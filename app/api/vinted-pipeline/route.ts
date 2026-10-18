@@ -68,7 +68,7 @@ async function writeServerStock(stock: unknown[], userId: string) {
 
 async function reserveServerSku(userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    const { data, error } = await getSupabaseAdmin().rpc("reserve_vinted_sku");
+    const { data, error } = await getSupabaseAdmin().rpc("reserve_vinted_sku", { p_user_id: userId });
     if (error) throw new Error(`Réservation Supabase impossible : ${error.message}`);
     return String(data).padStart(3, "0");
   }
@@ -301,8 +301,9 @@ export async function POST(request: Request) {
   if (input.action === "reserve-sku") {
     try {
       return json({ success: true, skuId: await reserveServerSku(userId) });
-    } catch {
-      return json({ success: false, error: "Réservation du SKU impossible." }, 500);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Erreur Supabase inconnue.";
+      return json({ success: false, error: `Réservation du SKU impossible : ${message}` }, 500);
     }
   }
 
@@ -313,8 +314,9 @@ export async function POST(request: Request) {
     try {
       await writeServerStock(input.stock, userId);
       return json({ success: true, count: input.stock.length });
-    } catch {
-      return json({ success: false, error: "Écriture du stock central impossible." }, 500);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Erreur Supabase inconnue.";
+      return json({ success: false, error: `Écriture du stock central impossible : ${message}` }, 500);
     }
   }
 
