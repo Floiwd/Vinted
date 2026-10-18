@@ -167,6 +167,55 @@ async function photoToDataUrl(file: File) {
   });
 }
 
+async function compressPhotoDataUrl(dataUrl: string, maxDimension: number, quality: number) {
+  const image = new window.Image();
+  image.src = dataUrl;
+  await image.decode();
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Compression des photos indisponible dans ce navigateur.");
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Compression de photo impossible.")), "image/jpeg", quality);
+  });
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Lecture de la photo compressée impossible."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function createAnalysisRequestBody(photos: Photo[], prixAchat: number | null, mode: Mode, skuId: string) {
+  const limitBytes = 3_500_000;
+  const variants = [
+    { maxDimension: 1500, quality: 0.78 },
+    { maxDimension: 1200, quality: 0.62 },
+    { maxDimension: 900, quality: 0.48 },
+  ];
+
+  for (const variant of variants) {
+    const requestPhotos = variant.maxDimension === 1500
+      ? photos
+      : await Promise.all(photos.map(async (photo) => ({
+        ...photo,
+        dataUrl: await compressPhotoDataUrl(photo.dataUrl, variant.maxDimension, variant.quality),
+      })));
+    const body = JSON.stringify({
+      photos: requestPhotos.map(({ dataUrl, angle }) => ({ dataUrl, angle })),
+      prixAchat,
+      mode,
+      skuId,
+    });
+    if (new Blob([body]).size <= limitBytes) return body;
+  }
+
+  throw new Error("Les photos dépassent encore la limite d’envoi. Réduis leur nombre ou leur taille puis réessaie.");
+}
+
 function CopyButton({ text, field, copied, onCopy, label = "Copier" }: {
   text: string; field: string; copied: string | null; onCopy: (text: string, field: string) => void; label?: string;
 }) {
@@ -647,13 +696,15 @@ export default function VintedDashboard() {
       });
       const skuPayload = await skuResponse.json() as { success: boolean; skuId?: string; error?: string };
       if (!skuResponse.ok || !skuPayload.success || !skuPayload.skuId) throw new Error(skuPayload.error || "Réservation du SKU impossible.");
+      const analysisBody = await createAnalysisRequestBody(photos, prixAchat ? Number(prixAchat) : null, mode, skuPayload.skuId);
       const response = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ photos: photos.map(({ dataUrl, angle }) => ({ dataUrl, angle })), prixAchat: prixAchat ? Number(prixAchat) : null, mode, skuId: skuPayload.skuId }),
+        body: analysisBody,
       });
-      const payload = await response.json() as { success: boolean; data?: Listing; error?: string; warning?: string };
-      if (!response.ok || !payload.success || !payload.data) throw new Error(payload.error || "Le pipeline n'a pas abouti.");
+      const payload = await response.json().catch(() => null) as { success: boolean; data?: Listing; error?: string; warning?: string } | null;
+      if (response.status === 413) throw new Error("Les photos dépassent la limite d’envoi du serveur. Réduis leur nombre ou leur taille puis réessaie.");
+      if (!response.ok || !payload?.success || !payload.data) throw new Error(payload?.error || "Le pipeline n'a pas abouti.");
       setProgress(100);
       setResult(payload.data);
       persist([payload.data, ...history.filter((entry) => entry.sku_id !== payload.data!.sku_id)]);
