@@ -6,9 +6,11 @@ import Cropper from "react-easy-crop";
 import type { Html5Qrcode as Html5QrcodeInstance } from "html5-qrcode";
 import { QRCodeSVG } from "qrcode.react";
 import "react-easy-crop/react-easy-crop.css";
+import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ArrowDownToLine, ArrowRight, BadgeCheck, Barcode, Box, CalendarDays, Check, CheckCircle2, Clipboard, Clock3,
-  Copy, FileText, ImagePlus, KeyRound, LockKeyhole, LogOut, MapPin, PackageCheck, Plus, Printer, RefreshCw,
+  Copy, FileText, ImagePlus, LockKeyhole, LogOut, Mail, MapPin, PackageCheck, Plus, Printer, RefreshCw,
   ScanLine, Search, ShieldAlert, ShieldCheck, Sparkles, Tag, TrendingUp, Upload, Wallet, X, Zap,
 } from "lucide-react";
 
@@ -31,6 +33,25 @@ type Listing = {
 };
 
 const HISTORY_KEY = "vinted-coo-stock-v1";
+function localHistoryKey(userId: string) {
+  return `${HISTORY_KEY}:${userId}`;
+}
+
+function readLocalHistory(userId: string): Listing[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(localHistoryKey(userId)) || "[]") as Listing[];
+    if (!Array.isArray(stored)) return [];
+    return stored.map((entry) => entry.checklist ? entry : {
+      ...entry,
+      checklist: emptyChecklist(),
+      statut: entry.statut === "PRET_A_PUBLIER" ? "A_COMPLETER" : entry.statut,
+      updated_at: entry.updated_at || entry.created_at || new Date().toISOString(),
+    });
+  } catch {
+    return [];
+  }
+}
+
 const STATUS_LABELS: Record<Status, string> = {
   EN_TRANSIT: "En transit", A_COMPLETER: "À compléter", PRET_A_PUBLIER: "Prêt à publier", EN_LIGNE: "En ligne", VENDU: "Vendu",
 };
@@ -197,10 +218,15 @@ function QrScanner({ onScan }: { onScan: (value: string) => void }) {
 export default function VintedDashboard() {
   const [authReady, setAuthReady] = useState(false);
   const [referenceTime, setReferenceTime] = useState(0);
-  const [configured, setConfigured] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
-  const [pin, setPin] = useState("");
-  const [pinError, setPinError] = useState("");
+  const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [signedInEmail, setSignedInEmail] = useState("");
+  const [userId, setUserId] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+  const [authPending, setAuthPending] = useState(false);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [prixAchat, setPrixAchat] = useState("");
   const [mode, setMode] = useState<Mode>("SEMAINE_ACHAT");
@@ -233,32 +259,60 @@ export default function VintedDashboard() {
   const [shippingError, setShippingError] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
   const syncQueue = useRef<Promise<void>>(Promise.resolve());
+  const supabaseRef = useRef<SupabaseClient | null>(null);
+
+  async function apiFetch(input: RequestInfo | URL, init?: RequestInit) {
+    const client = supabaseRef.current;
+    if (!client) throw new Error("Le client Supabase n'est pas initialisé.");
+    const { data, error: sessionError } = await client.auth.getSession();
+    if (sessionError || !data.session) throw new Error("Connecte-toi pour continuer.");
+    const headers = new Headers(init?.headers);
+    headers.set("Authorization", `Bearer ${data.session.access_token}`);
+    return fetch(input, { ...init, headers });
+  }
 
   useEffect(() => {
-    fetch("/api/vinted-pipeline")
-      .then((response) => response.json())
-      .then((data: { configured: boolean; unlocked: boolean }) => {
-        let stored: Listing[] = [];
-        try {
-          stored = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]") as Listing[];
-          if (!Array.isArray(stored)) stored = [];
-          stored = stored.map((entry) => entry.checklist ? entry : {
-            ...entry,
-            checklist: emptyChecklist(),
-            statut: entry.statut === "PRET_A_PUBLIER" ? "A_COMPLETER" : entry.statut,
-            updated_at: entry.updated_at || entry.created_at || new Date().toISOString(),
-          });
-        } catch {
-          stored = [];
+    let active = true;
+    let unsubscribe: () => void = () => {};
+
+    async function initializeAuth() {
+      try {
+        const client = getSupabaseBrowserClient();
+        supabaseRef.current = client;
+        const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+          setUnlocked(Boolean(session));
+          setUserId(session?.user.id || "");
+          setSignedInEmail(session?.user.email || "");
+          if (!session) setHistory([]);
+        });
+        unsubscribe = () => subscription.unsubscribe();
+
+        const { data, error: sessionError } = await client.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!active) return;
+        if (data.session) {
+          const stored = readLocalHistory(data.session.user.id);
+          setHistory(stored);
+          setUnlocked(true);
+          setUserId(data.session.user.id);
+          setSignedInEmail(data.session.user.email || "");
+          await synchronizeFromServer(stored, data.session.user.id);
+        } else {
+          setHistory([]);
         }
-        setHistory(stored);
-        if (data.unlocked) void synchronizeFromServer(stored);
-        setConfigured(data.configured);
-        setUnlocked(data.unlocked);
         setReferenceTime(Date.now());
-      })
-      .catch(() => setPinError("Impossible de joindre le serveur."))
-      .finally(() => setAuthReady(true));
+      } catch (error) {
+        if (active) setAuthError(error instanceof Error ? error.message : "Configuration Supabase invalide.");
+      } finally {
+        if (active) setAuthReady(true);
+      }
+    }
+
+    void initializeAuth();
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -339,10 +393,10 @@ export default function VintedDashboard() {
     const now = new Date().toISOString();
     const normalized = next.map((entry) => ({ ...entry, updated_at: entry.updated_at || entry.created_at || now }));
     setHistory(normalized);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(normalized));
-    if (!unlocked) return;
+    if (userId) localStorage.setItem(localHistoryKey(userId), JSON.stringify(normalized));
+    if (!unlocked || !userId) return;
     syncQueue.current = syncQueue.current.catch(() => undefined).then(async () => {
-      const response = await fetch("/api/vinted-pipeline", {
+      const response = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "sync-stock", stock: normalized }),
@@ -352,15 +406,15 @@ export default function VintedDashboard() {
     }).catch(() => setSyncState("Copie locale uniquement · serveur indisponible"));
   }
 
-  async function synchronizeFromServer(localStock: Listing[]) {
+  async function synchronizeFromServer(localStock: Listing[], ownerId: string) {
     try {
-      const response = await fetch("/api/vinted-pipeline?resource=stock");
+      const response = await apiFetch("/api/vinted-pipeline?resource=stock");
       if (!response.ok) throw new Error("Lecture serveur impossible");
       const payload = await response.json() as { stock: Listing[] };
       const merged = mergeStock(Array.isArray(payload.stock) ? payload.stock : [], localStock);
       setHistory(merged);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(merged));
-      const saveResponse = await fetch("/api/vinted-pipeline", {
+      localStorage.setItem(localHistoryKey(ownerId), JSON.stringify(merged));
+      const saveResponse = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "sync-stock", stock: merged }),
@@ -372,27 +426,44 @@ export default function VintedDashboard() {
     }
   }
 
-  async function unlockDashboard(event: FormEvent<HTMLFormElement>) {
+  async function authenticate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPinError("");
-    const response = await fetch("/api/vinted-pipeline", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unlock", pin }),
-    });
-    const data = await response.json() as { success: boolean; error?: string };
-    if (!response.ok) {
-      setPinError(data.error || "Déverrouillage refusé.");
-      return;
+    setAuthError("");
+    setAuthMessage("");
+    setAuthPending(true);
+    try {
+      const client = supabaseRef.current;
+      if (!client) throw new Error("Supabase n'est pas configuré.");
+      const result = authMode === "sign-up"
+        ? await client.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: window.location.origin } })
+        : await client.auth.signInWithPassword({ email: email.trim(), password });
+      if (result.error) throw result.error;
+      if (!result.data.session) {
+        setAuthMessage("Compte créé. Consulte ta messagerie pour confirmer l'adresse e-mail.");
+        return;
+      }
+      if (!result.data.user) throw new Error("Supabase n'a pas renvoyé le compte connecté.");
+      const nextUserId = result.data.user.id;
+      const stored = readLocalHistory(nextUserId);
+      setHistory(stored);
+      setUserId(nextUserId);
+      setSignedInEmail(result.data.user.email || email.trim());
+      setUnlocked(true);
+      await synchronizeFromServer(stored, nextUserId);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Connexion impossible.");
+    } finally {
+      setAuthPending(false);
     }
-    await synchronizeFromServer(history);
-    setUnlocked(true);
-    setPin("");
   }
 
-  async function lockDashboard() {
-    await fetch("/api/vinted-pipeline", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "lock" }),
-    });
+  async function signOut() {
+    const client = supabaseRef.current;
+    if (client) await client.auth.signOut();
     setUnlocked(false);
+    setUserId("");
+    setSignedInEmail("");
+    setHistory([]);
     setResult(null);
     setPhotos([]);
   }
@@ -420,7 +491,7 @@ export default function VintedDashboard() {
       reader.onerror = () => reject(new Error("Lecture du justificatif impossible."));
       reader.readAsDataURL(file);
     });
-    const response = await fetch("/api/vinted-pipeline", {
+    const response = await apiFetch("/api/vinted-pipeline", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "save-receipt", skuId: sku, fileName: file.name, dataUrl }),
@@ -433,6 +504,21 @@ export default function VintedDashboard() {
     updateListing(sku, { justificatif_nom: payload.receipt_name, justificatif_url: payload.receipt_url });
     setError("");
     setNotice("Justificatif d'achat enregistré sur le serveur.");
+  }
+
+  async function openReceipt(url: string) {
+    const tab = window.open("about:blank", "_blank");
+    try {
+      const response = await apiFetch(url);
+      if (!response.ok) throw new Error("Ouverture du reçu impossible.");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      if (tab) tab.location.replace(objectUrl);
+      else window.location.assign(objectUrl);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    } catch (error) {
+      tab?.close();
+      setError(error instanceof Error ? error.message : "Ouverture du reçu impossible.");
+    }
   }
 
   async function readShippingLabel(file: File): Promise<ShippingLabel> {
@@ -545,14 +631,14 @@ export default function VintedDashboard() {
     setError("");
     setNotice("");
     try {
-      const skuResponse = await fetch("/api/vinted-pipeline", {
+      const skuResponse = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "reserve-sku" }),
       });
       const skuPayload = await skuResponse.json() as { success: boolean; skuId?: string; error?: string };
       if (!skuResponse.ok || !skuPayload.success || !skuPayload.skuId) throw new Error(skuPayload.error || "Réservation du SKU impossible.");
-      const response = await fetch("/api/vinted-pipeline", {
+      const response = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ photos: photos.map(({ dataUrl, angle }) => ({ dataUrl, angle })), prixAchat: prixAchat ? Number(prixAchat) : null, mode, skuId: skuPayload.skuId }),
@@ -706,7 +792,7 @@ export default function VintedDashboard() {
     persist(nextHistory);
     if (unlocked) {
       syncQueue.current = syncQueue.current.catch(() => undefined).then(async () => {
-        const response = await fetch("/api/vinted-pipeline", {
+        const response = await apiFetch("/api/vinted-pipeline", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "delete-stock", skuId: sku }),
@@ -736,24 +822,24 @@ export default function VintedDashboard() {
   const activeShippingLabel = shippingLabels[activeShippingIndex];
 
   if (!authReady) return <main className="auth-screen"><div className="auth-card"><RefreshCw className="size-5 animate-spin text-emerald-400" /><span>Initialisation du tableau de bord...</span></div></main>;
-  if (!configured || !unlocked) return (
+  if (!unlocked) return (
     <main className="auth-screen">
       <section className="auth-card">
         <div className="brand-mark"><Zap className="size-5 fill-current" /></div>
         <p className="eyebrow">VINTED COO <span>·</span> ESPACE PRIVÉ</p>
-        <h1>{configured ? "Accès sécurisé" : "Configuration requise"}</h1>
-        <p className="auth-copy">{configured ? "Saisissez votre code pour accéder à votre cockpit de sourcing." : "Définissez un PIN serveur avant d'ouvrir le tableau de bord."}</p>
-        {!configured ? (
-          <div className="setup-hint"><code>VINTED_DASHBOARD_PIN</code> à définir dans l&apos;environnement serveur, puis redémarrer Next.js.</div>
-        ) : (
-          <form className="pin-form" onSubmit={unlockDashboard}>
-            <label htmlFor="dashboard-pin">Code PIN</label>
-            <div className="pin-input-wrap"><KeyRound className="size-4" /><input id="dashboard-pin" type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={(event) => setPin(event.target.value)} autoFocus required /></div>
-            {pinError && <p className="inline-error">{pinError}</p>}
-            <button className="primary-button w-full" type="submit"><LockKeyhole className="size-4" /> Déverrouiller <ArrowRight className="size-4 ml-auto" /></button>
-          </form>
-        )}
-        <div className="auth-foot"><ShieldCheck className="size-4" /> Session privée, expiration automatique après 12 h</div>
+        <h1>{authMode === "sign-in" ? "Connexion à ton espace" : "Créer un compte"}</h1>
+        <p className="auth-copy">Connecte-toi avec ton compte Supabase pour retrouver ton stock et tes étiquettes QR.</p>
+        <form className="pin-form" onSubmit={authenticate}>
+          <label htmlFor="account-email">Adresse e-mail</label>
+          <div className="pin-input-wrap"><Mail className="size-4" /><input id="account-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} autoFocus required /></div>
+          <label htmlFor="account-password">Mot de passe</label>
+          <div className="pin-input-wrap"><LockKeyhole className="size-4" /><input id="account-password" type="password" autoComplete={authMode === "sign-up" ? "new-password" : "current-password"} minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} required /></div>
+          {authError && <p className="inline-error">{authError}</p>}
+          {authMessage && <p className="auth-copy">{authMessage}</p>}
+          <button className="primary-button w-full" type="submit" disabled={authPending}>{authPending ? <RefreshCw className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />}{authMode === "sign-in" ? "Se connecter" : "Créer mon compte"}<ArrowRight className="size-4 ml-auto" /></button>
+        </form>
+        <button className="text-link" type="button" onClick={() => { setAuthMode(authMode === "sign-in" ? "sign-up" : "sign-in"); setAuthError(""); setAuthMessage(""); }}>{authMode === "sign-in" ? "Créer un compte" : "J'ai déjà un compte"}</button>
+        <div className="auth-foot"><ShieldCheck className="size-4" /> Connexion sécurisée par Supabase Auth</div>
       </section>
     </main>
   );
@@ -763,7 +849,7 @@ export default function VintedDashboard() {
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Vinted COO accueil"><span className="brand-mark"><Zap className="size-4 fill-current" /></span><span>VINTED<span className="brand-muted"> / COO</span></span></a>
         <div className="topbar-center"><span className="live-dot" /> PIPELINE OPÉRATIONNEL <span className="topbar-divider">/</span> EUROPE · PARIS</div>
-        <button className="icon-action lock-action" onClick={lockDashboard} title="Verrouiller" aria-label="Verrouiller"><LogOut className="size-4" /><span>Verrouiller</span></button>
+        <button className="icon-action lock-action" onClick={signOut} title="Se déconnecter" aria-label="Se déconnecter"><LogOut className="size-4" /><span>{signedInEmail || "Déconnexion"}</span></button>
       </header>
 
       <div className="dashboard-content" id="top">
@@ -864,7 +950,7 @@ export default function VintedDashboard() {
                 <div className="stock-item"><span className="stock-item-icon"><Box className="size-4" /></span><div><span className="sku-tag">{entry.sku_id}</span><h3>{entry.marque} {entry.modele}</h3><p>{entry.categorie} · Taille {entry.taille}{entry.emplacement ? ` · ${entry.emplacement}` : ""}{entry.statut === "EN_LIGNE" && entry.date_publication ? ` · En ligne depuis ${daysSince(entry.date_publication, referenceTime)} j` : ""}</p>{entry.fournisseur && <small>Achat : {entry.fournisseur}{entry.date_achat ? ` · ${entry.date_achat}` : ""}{entry.date_limite_retour ? ` · Retour avant ${entry.date_limite_retour}` : ""}</small>}</div></div>
                 <div className="stock-finance"><span>CTA <b>{euro(entry.cta_ttc)}</b></span><span>Revente <b className={entry.prix_revente < entry.prix_min_x2 ? "text-red-300" : "green-text"}>{euro(entry.prix_revente)}</b></span>{entry.statut === "VENDU" && Number.isFinite(entry.prix_vendu) && <span>Net {Number.isFinite(entry.frais_reels) ? "réel" : "estimé"}<b className={(netProfit(entry) ?? 0) < 0 ? "text-red-300" : "green-text"}>{euro(netProfit(entry) ?? 0)}</b></span>}</div>
                 {entry.statut === "EN_LIGNE" && daysSince(entry.date_publication, referenceTime) >= 14 && <div className="stagnant-alert"><span>Suggestion -5 % : <b>{euro(Math.max(1, Math.floor(entry.prix_revente * 0.95)))}</b>{Math.floor(entry.prix_revente * 0.95) < entry.prix_min_x2 ? <small> · sous le seuil x2</small> : null}</span><button className="secondary-button small-button" onClick={() => applyPriceSuggestion(entry)}>Appliquer</button><button className="secondary-button small-button" onClick={() => markRelisted(entry)}>Remise en ligne effectuée</button></div>}
-                <div className="stock-actions"><select aria-label={`Statut de ${entry.sku_id}`} value={entry.statut} onChange={(event) => changeListingStatus(entry, event.target.value as Status)}>{Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{entry.statut === "VENDU" && <><label className="sold-price"><span>€</span><input type="number" min="0" step="0.01" placeholder="Encaissé" value={entry.prix_vendu ?? ""} onChange={(event) => updateListing(entry.sku_id, { prix_vendu: event.target.value === "" ? undefined : Number(event.target.value) })} aria-label="Prix réellement encaissé" /></label><label className="sold-price"><span>€</span><input type="number" min="0" step="0.01" placeholder="Frais réels" value={entry.frais_reels ?? ""} onChange={(event) => updateListing(entry.sku_id, { frais_reels: event.target.value === "" ? undefined : Number(event.target.value) })} aria-label="Frais réels hors achat" /></label></>}<label className="receipt-button"><FileText className="size-3.5" /><span>{entry.justificatif_nom || "Justificatif"}</span><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadPurchaseReceipt(entry.sku_id, file); event.currentTarget.value = ""; }} aria-label="Ajouter un justificatif d'achat" /></label>{entry.justificatif_url && <a className="text-link" href={entry.justificatif_url} target="_blank" rel="noreferrer">Voir le reçu</a>}<button className="secondary-button small-button" onClick={() => startEditing(entry)}>Modifier</button><button className="danger-button" onClick={() => deleteListing(entry.sku_id)}>Supprimer</button><CopyButton text={`${entry.titre_seo}\n\n${entry.description}\n\n${entry.hashtags}`} field={entry.sku_id} copied={copied} onCopy={copyText} label="Copier" /></div>
+                <div className="stock-actions"><select aria-label={`Statut de ${entry.sku_id}`} value={entry.statut} onChange={(event) => changeListingStatus(entry, event.target.value as Status)}>{Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{entry.statut === "VENDU" && <><label className="sold-price"><span>€</span><input type="number" min="0" step="0.01" placeholder="Encaissé" value={entry.prix_vendu ?? ""} onChange={(event) => updateListing(entry.sku_id, { prix_vendu: event.target.value === "" ? undefined : Number(event.target.value) })} aria-label="Prix réellement encaissé" /></label><label className="sold-price"><span>€</span><input type="number" min="0" step="0.01" placeholder="Frais réels" value={entry.frais_reels ?? ""} onChange={(event) => updateListing(entry.sku_id, { frais_reels: event.target.value === "" ? undefined : Number(event.target.value) })} aria-label="Frais réels hors achat" /></label></>}<label className="receipt-button"><FileText className="size-3.5" /><span>{entry.justificatif_nom || "Justificatif"}</span><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadPurchaseReceipt(entry.sku_id, file); event.currentTarget.value = ""; }} aria-label="Ajouter un justificatif d'achat" /></label>{entry.justificatif_url && <button className="text-link" type="button" onClick={() => void openReceipt(entry.justificatif_url!)}>Voir le reçu</button>}<button className="secondary-button small-button" onClick={() => startEditing(entry)}>Modifier</button><button className="danger-button" onClick={() => deleteListing(entry.sku_id)}>Supprimer</button><CopyButton text={`${entry.titre_seo}\n\n${entry.description}\n\n${entry.hashtags}`} field={entry.sku_id} copied={copied} onCopy={copyText} label="Copier" /></div>
                 <details className="stock-checklist"><summary>Checklist {CHECKLIST_ITEMS.filter(({ key }) => entry.checklist?.[key]).length}/5</summary><ChecklistFields checklist={entry.checklist || emptyChecklist()} onChange={(key, checked) => updateChecklistItem(entry.sku_id, key, checked)} /></details>
               </>}</article>)}</div> : <div className="empty-stock"><Clipboard className="size-6" /><strong>{history.length ? "Aucun résultat pour ces filtres." : "Aucun article dans le stock."}</strong><span>Les annonces générées apparaîtront ici automatiquement.</span>{!history.length && <button className="text-link" onClick={() => setView("pipeline")}>Créer un premier article <ArrowRight className="size-3.5" /></button>}</div>}
             <div className="stock-footnote"><span><ShieldCheck className="size-3.5" /> Historique conservé dans le stockage local de ce navigateur</span><span>Rentabilité réalisée : <b className={globalProfit < 0 ? "text-red-300" : "green-text"}>{euro(globalProfit)}</b></span></div>

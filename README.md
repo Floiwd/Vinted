@@ -18,13 +18,13 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 ## Configuration
 
-Copy `.env.example` to `.env.local` and set a private `VINTED_DASHBOARD_PIN`, a long random `DASHBOARD_SESSION_SECRET`, and your server-side `OMNIROUTE_API_KEY`. Configure `OMNIROUTE_BASE_URL` for your OmniRoute instance. `STOCK_PIPELINE` is optional; when set, generated stock entries are sent as JSON to that Google Apps Script web app. Keep these values server-side; do not use `NEXT_PUBLIC_` variables for secrets.
+Copy `.env.example` to `.env.local`. In Supabase, enable email/password authentication and set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_URL`, and the server-only `SUPABASE_SERVICE_ROLE_KEY`. The service-role key must never use the `NEXT_PUBLIC_` prefix. Create accounts from the app's sign-up screen. Set `OMNIROUTE_API_KEY` and `OMNIROUTE_BASE_URL` for listing analysis. `STOCK_PIPELINE` is optional: add a deployed Google Apps Script `/exec` URL only if you also want generated entries copied to Google Sheets; leave it blank to use Supabase only.
 
 At least three photos are required for analysis. The purchase price may be omitted and estimated by the vision model. The browser keeps a local cache and synchronizes inventory to the authenticated app server. By default, the server stores `stock.json`, its numeric SKU counter, and private purchase receipts under `.vinted-data/` (ignored by Git). Set `VINTED_DATA_DIR` to choose another persistent directory. Devices must use the same app server to share inventory; deployments with ephemeral filesystems need a persistent volume or an external database. Export a CSV for backups or enable Sheets synchronization with `STOCK_PIPELINE`.
 
 The stock view supports physical shelf/bin locations, purchase and return dates, and private receipt uploads. The Labels view prints QR cards with a readable SKU, offers camera scanning, and crops a PDF's first page or an image to export the selected area as a 100 × 150 mm PDF. Use a secure context (HTTPS or localhost) for camera access.
 
-The PIN uses a signed, HttpOnly 12-hour session cookie. Configure an external rate limiter and HTTPS before exposing the app publicly; built-in login throttling is process-local.
+Supabase Auth manages account creation, email/password sign-in, and persistent sessions. The API validates each access token server-side and scopes stock and receipt storage to the authenticated user.
 
 ## Checks
 

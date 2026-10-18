@@ -1,4 +1,4 @@
-import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -8,15 +8,11 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 export const runtime = "nodejs";
 export const maxDuration = 140;
 
-const SESSION_COOKIE = "vinted_coo_session";
-const SESSION_TTL_SECONDS = 60 * 60 * 12;
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 let skuReservationQueue = Promise.resolve();
 
 type PhotoInput = { dataUrl: string; angle: string };
 type PipelineInput = {
   action?: string;
-  pin?: string;
   stock?: unknown[];
   skuId?: string;
   fileName?: string;
@@ -26,25 +22,27 @@ type PipelineInput = {
   mode?: "SEMAINE_ACHAT" | "WEEKEND_SHOOTING";
 };
 
-function dataDirectory() {
-  return process.env.VINTED_DATA_DIR || join(process.cwd(), ".vinted-data");
+function dataDirectory(userId: string) {
+  return join(process.env.VINTED_DATA_DIR || join(process.cwd(), ".vinted-data"), userId);
 }
 
-async function readServerStock() {
+async function readServerStock(userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    const { data, error } = await getSupabaseAdmin().from("vinted_stock").select("data").order("updated_at", { ascending: false });
+    const { data, error } = await getSupabaseAdmin().from("vinted_stock").select("data")
+      .like("sku_id", `${userId}:%`).eq("data->>owner_id", userId)
+      .order("updated_at", { ascending: false });
     if (error) throw new Error(`Lecture Supabase impossible : ${error.message}`);
     return (data || []).map((row) => row.data) as unknown[];
   }
   try {
-    return JSON.parse(await readFile(join(dataDirectory(), "stock.json"), "utf8")) as unknown[];
+    return JSON.parse(await readFile(join(dataDirectory(userId), "stock.json"), "utf8")) as unknown[];
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
   }
 }
 
-async function writeServerStock(stock: unknown[]) {
+async function writeServerStock(stock: unknown[], userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
     const now = new Date().toISOString();
     const rows = stock.map((entry) => {
@@ -53,14 +51,14 @@ async function writeServerStock(stock: unknown[]) {
         throw new Error("SKU de stock invalide.");
       }
       const updatedAt = typeof item.updated_at === "string" ? item.updated_at : now;
-      return { sku_id: item.sku_id, data: { ...item, updated_at: updatedAt }, updated_at: updatedAt };
+      return { sku_id: `${userId}:${item.sku_id}`, data: { ...item, owner_id: userId, updated_at: updatedAt }, updated_at: updatedAt };
     });
     if (!rows.length) return;
     const { error } = await getSupabaseAdmin().from("vinted_stock").upsert(rows, { onConflict: "sku_id" });
     if (error) throw new Error(`Écriture Supabase impossible : ${error.message}`);
     return;
   }
-  const directory = dataDirectory();
+  const directory = dataDirectory(userId);
   const filePath = join(directory, "stock.json");
   const temporaryPath = join(directory, `stock-${randomInt(1_000_000_000)}.tmp`);
   await mkdir(directory, { recursive: true });
@@ -68,7 +66,7 @@ async function writeServerStock(stock: unknown[]) {
   await rename(temporaryPath, filePath);
 }
 
-async function reserveServerSku() {
+async function reserveServerSku(userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
     const { data, error } = await getSupabaseAdmin().rpc("reserve_vinted_sku");
     if (error) throw new Error(`Réservation Supabase impossible : ${error.message}`);
@@ -76,9 +74,9 @@ async function reserveServerSku() {
   }
   let reservedSku = "";
   const reserve = async () => {
-    const directory = dataDirectory();
+    const directory = dataDirectory(userId);
     await mkdir(directory, { recursive: true });
-    const stock = await readServerStock();
+    const stock = await readServerStock(userId);
     const stockMaximum = stock.reduce<number>((maximum, entry) => {
       const sku = (entry as { sku_id?: unknown })?.sku_id;
       return typeof sku === "string" && /^\d{3,9}$/.test(sku) ? Math.max(maximum, Number(sku)) : maximum;
@@ -98,57 +96,32 @@ async function reserveServerSku() {
   return reservedSku;
 }
 
-async function deleteServerStock(skuId: string) {
+async function deleteServerStock(skuId: string, userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    const { error } = await getSupabaseAdmin().from("vinted_stock").delete().eq("sku_id", skuId);
+    const { error } = await getSupabaseAdmin().from("vinted_stock").delete()
+      .eq("sku_id", `${userId}:${skuId}`).eq("data->>owner_id", userId);
     if (error) throw new Error(`Suppression Supabase impossible : ${error.message}`);
     return;
   }
-  const stock = await readServerStock();
-  await writeServerStock(stock.filter((entry) => (entry as { sku_id?: string }).sku_id !== skuId));
+  const stock = await readServerStock(userId);
+  await writeServerStock(stock.filter((entry) => (entry as { sku_id?: string }).sku_id !== skuId), userId);
 }
 
 function json(data: unknown, status = 200, headers?: HeadersInit) {
   return Response.json(data, { status, headers });
 }
 
-function signature(value: string) {
-  const secret = process.env.DASHBOARD_SESSION_SECRET || process.env.VINTED_DASHBOARD_PIN;
-  if (!secret) return "";
-  return createHmac("sha256", secret).update(value).digest("hex");
-}
-
-function validSession(request: Request) {
-  const pin = process.env.VINTED_DASHBOARD_PIN;
-  if (!pin) return false;
-  const cookie = request.headers.get("cookie") ?? "";
-  const token = cookie.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`))?.[1];
-  if (!token) return false;
-  let decodedToken: string;
+async function authenticateRequest(request: Request): Promise<{ userId?: string; status?: number }> {
+  const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!token) return { status: 401 };
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return { status: 503 };
   try {
-    decodedToken = decodeURIComponent(token);
+    const { data, error } = await getSupabaseAdmin().auth.getUser(token);
+    if (error || !data.user) return { status: 401 };
+    return { userId: data.user.id };
   } catch {
-    return false;
+    return { status: 503 };
   }
-  const [issuedAt, suppliedSignature] = decodedToken.split(".");
-  const timestamp = Number(issuedAt);
-  if (!Number.isFinite(timestamp) || timestamp > Date.now() || Date.now() - timestamp > SESSION_TTL_SECONDS * 1000) return false;
-  const expected = signature(issuedAt);
-  if (!expected || !suppliedSignature) return false;
-  const expectedBuffer = Buffer.from(expected);
-  const suppliedBuffer = Buffer.from(suppliedSignature);
-  return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
-}
-
-function sessionCookie(value: string, maxAge: number) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
-}
-
-function sameSecret(left: string, right: string) {
-  const leftBuffer = createHmac("sha256", "pin-check").update(left).digest();
-  const rightBuffer = createHmac("sha256", "pin-check").update(right).digest();
-  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function nextPublicationSlot() {
@@ -272,19 +245,22 @@ function parseJson<T>(text: string): T {
 }
 
 export async function GET(request: Request) {
-  const configured = Boolean(process.env.VINTED_DASHBOARD_PIN);
+  const auth = await authenticateRequest(request);
+  if (!auth.userId) {
+    const status = auth.status || 401;
+    return json({ success: false, error: status === 503 ? "Supabase Auth n'est pas configuré côté serveur." : "Session Supabase invalide." }, status);
+  }
+  const userId = auth.userId;
   const url = new URL(request.url);
   if (url.searchParams.get("resource") === "stock") {
-    if (!validSession(request)) return json({ success: false, error: "Session expirée." }, 401);
     try {
-      return json({ success: true, stock: await readServerStock() });
+      return json({ success: true, stock: await readServerStock(userId) });
     } catch {
       return json({ success: false, error: "Lecture du stock central impossible." }, 500);
     }
   }
   const receiptSku = url.searchParams.get("receipt");
   if (receiptSku) {
-    if (!validSession(request)) return json({ success: false, error: "Session expirée." }, 401);
     if (!/^(?:\d{3,6}|VTD-[A-Z0-9]{4,12})$/i.test(receiptSku)) return json({ success: false, error: "Référence invalide." }, 400);
     const extension = url.searchParams.get("ext");
     const contentTypes: Record<string, string> = { pdf: "application/pdf", jpg: "image/jpeg", png: "image/png", webp: "image/webp" };
@@ -292,11 +268,11 @@ export async function GET(request: Request) {
     try {
       let receiptBytes: Uint8Array;
       if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-        const { data, error } = await getSupabaseAdmin().storage.from("purchase-receipts").download(`${receiptSku}.${extension}`);
+        const { data, error } = await getSupabaseAdmin().storage.from("purchase-receipts").download(`${userId}/${receiptSku}.${extension}`);
         if (error || !data) throw new Error("Reçu Supabase introuvable.");
         receiptBytes = new Uint8Array(await data.arrayBuffer());
       } else {
-        receiptBytes = new Uint8Array(await readFile(join(dataDirectory(), "receipts", `${receiptSku}.${extension}`)));
+        receiptBytes = new Uint8Array(await readFile(join(dataDirectory(userId), "receipts", `${receiptSku}.${extension}`)));
       }
       const receiptBuffer = receiptBytes.buffer.slice(receiptBytes.byteOffset, receiptBytes.byteOffset + receiptBytes.byteLength) as ArrayBuffer;
       return new Response(receiptBuffer, { headers: { "Content-Type": contentTypes[extension], "Content-Disposition": "inline", "Cache-Control": "private, no-store" } });
@@ -304,7 +280,7 @@ export async function GET(request: Request) {
       return json({ success: false, error: "Reçu introuvable." }, 404);
     }
   }
-  return json({ configured, unlocked: configured && validSession(request) });
+  return json({ success: true, userId });
 }
 
 export async function POST(request: Request) {
@@ -315,36 +291,16 @@ export async function POST(request: Request) {
     return json({ success: false, error: "Requête JSON invalide." }, 400);
   }
 
-  if (input.action === "unlock") {
-    const expectedPin = process.env.VINTED_DASHBOARD_PIN;
-    if (!expectedPin) return json({ success: false, error: "Configurez VINTED_DASHBOARD_PIN dans l'environnement serveur." }, 503);
-    const address = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
-    const attempt = loginAttempts.get(address);
-    if (attempt && attempt.resetAt > Date.now() && attempt.count >= 5) {
-      return json({ success: false, error: "Trop de tentatives. Réessayez dans 15 minutes." }, 429);
-    }
-    if (!input.pin || !sameSecret(input.pin, expectedPin)) {
-      const current = attempt && attempt.resetAt > Date.now() ? attempt : { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
-      loginAttempts.set(address, { count: current.count + 1, resetAt: current.resetAt });
-      return json({ success: false, error: "Code PIN incorrect." }, 401);
-    }
-    loginAttempts.delete(address);
-    const issuedAt = String(Date.now());
-    return json(
-      { success: true },
-      200,
-      { "Set-Cookie": sessionCookie(`${issuedAt}.${signature(issuedAt)}`, SESSION_TTL_SECONDS) },
-    );
+  const auth = await authenticateRequest(request);
+  if (!auth.userId) {
+    const status = auth.status || 401;
+    return json({ success: false, error: status === 503 ? "Supabase Auth n'est pas configuré côté serveur." : "Session Supabase invalide." }, status);
   }
-
-  if (input.action === "lock") {
-    return json({ success: true }, 200, { "Set-Cookie": sessionCookie("", 0) });
-  }
-  if (!validSession(request)) return json({ success: false, error: "Session expirée. Déverrouillez le tableau de bord." }, 401);
+  const userId = auth.userId;
 
   if (input.action === "reserve-sku") {
     try {
-      return json({ success: true, skuId: await reserveServerSku() });
+      return json({ success: true, skuId: await reserveServerSku(userId) });
     } catch {
       return json({ success: false, error: "Réservation du SKU impossible." }, 500);
     }
@@ -355,7 +311,7 @@ export async function POST(request: Request) {
     const validItems = input.stock.every((item) => item && typeof item === "object" && typeof (item as { sku_id?: unknown }).sku_id === "string");
     if (!validItems || JSON.stringify(input.stock).length > 5_000_000) return json({ success: false, error: "Stock invalide ou trop volumineux." }, 400);
     try {
-      await writeServerStock(input.stock);
+      await writeServerStock(input.stock, userId);
       return json({ success: true, count: input.stock.length });
     } catch {
       return json({ success: false, error: "Écriture du stock central impossible." }, 500);
@@ -365,7 +321,7 @@ export async function POST(request: Request) {
   if (input.action === "delete-stock") {
     if (!/^(?:\d{3,9}|VTD-[A-Z0-9]{4,12})$/i.test(input.skuId || "")) return json({ success: false, error: "SKU invalide." }, 400);
     try {
-      await deleteServerStock(input.skuId!);
+      await deleteServerStock(input.skuId!, userId);
       return json({ success: true });
     } catch {
       return json({ success: false, error: "Suppression de l'article impossible." }, 500);
@@ -378,14 +334,14 @@ export async function POST(request: Request) {
     const match = input.dataUrl?.match(/^data:(application\/pdf|image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
     if (!match || match[2].length > 12_000_000) return json({ success: false, error: "Format invalide ou fichier supérieur à 8 Mo." }, 400);
     const extension = match[1] === "application/pdf" ? "pdf" : match[1].split("/")[1] === "jpeg" ? "jpg" : match[1].split("/")[1];
-    const filename = `${skuId}.${extension}`;
+    const filename = `${userId}/${skuId}.${extension}`;
     try {
       const receiptBytes = Buffer.from(match[2], "base64");
       if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
         const { error } = await getSupabaseAdmin().storage.from("purchase-receipts").upload(filename, receiptBytes, { contentType: match[1], upsert: true });
         if (error) throw new Error(`Enregistrement Supabase impossible : ${error.message}`);
       } else {
-        const directory = join(dataDirectory(), "receipts");
+        const directory = join(dataDirectory(userId), "receipts");
         await mkdir(directory, { recursive: true });
         await writeFile(join(directory, filename), receiptBytes);
       }
