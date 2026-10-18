@@ -1,0 +1,7 @@
+{
+  "name": "Vinted Assistant AI",
+  "description": "Assistant intelligent pour vendeurs Vinted :\n- Analyse photo instantanée\n- Titres SEO & Descriptions détaillées\n- Estimation de prix et de profit\n- Détection d'authenticité",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
