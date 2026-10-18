@@ -39,7 +39,16 @@ function localHistoryKey(userId: string) {
 
 function readLocalHistory(userId: string): Listing[] {
   try {
-    const stored = JSON.parse(localStorage.getItem(localHistoryKey(userId)) || "[]") as Listing[];
+    const accountKey = localHistoryKey(userId);
+    let raw = localStorage.getItem(accountKey);
+    if (raw === null) {
+      raw = localStorage.getItem(HISTORY_KEY);
+      if (raw !== null) {
+        localStorage.setItem(accountKey, raw);
+        localStorage.removeItem(HISTORY_KEY);
+      }
+    }
+    const stored = JSON.parse(raw || "[]") as Listing[];
     if (!Array.isArray(stored)) return [];
     return stored.map((entry) => entry.checklist ? entry : {
       ...entry,
