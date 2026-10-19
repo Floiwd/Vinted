@@ -20,7 +20,7 @@ function normalizeText(value: string | undefined, fallback = "") {
   const asText = typeof value === "string" ? value : fallback;
   return asText
     .replace(/```(?:json)?/gi, "")
-    .replace(/^(?:titre|title|description|hashtags|message_nego)\s*[:\-]\s*/i, "")
+    .replace(/^(?:titre|title|description|hashtags|message_nego)\s*[: -]\s*/i, "")
     .replace(/\*\*\*+/g, "")
     .replace(/\r/g, "")
     .replace(/\n{3,}/g, "\n\n")
@@ -38,7 +38,7 @@ export function sanitizeAdCopy(input: AdCopyInput) {
     .replace(/\s+/g, " ")
     .trim();
   const description = normalizeText(input.description, "Vêtement en bon état, à découvrir et à essayer.")
-    .replace(/^Description\s*[:\-]?\s*/i, "")
+    .replace(/^Description\s*[: -]?\s*/i, "")
     .replace(/\[(?:\s*[^\]]+\s*\|\s*[^\]]+\s*)\]/g, "")
     .replace(/[\t ]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -51,7 +51,7 @@ export function sanitizeAdCopy(input: AdCopyInput) {
   )).slice(0, 8);
   const resolvedHashtags = hashtags.length >= 5 ? hashtags : [...hashtags, ...FALLBACK_HASHTAGS].slice(0, 8);
   const message = normalizeText(input.message_nego, "Bonjour, je suis intéressé. Serait-il possible d’ajuster le prix ?")
-    .replace(/^(?:message\s*de\s*négociation|message\s*nego)\s*[:\-]?\s*/i, "")
+    .replace(/^(?:message\s*de\s*négociation|message\s*nego)\s*[: -]?\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
 
