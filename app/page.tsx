@@ -522,10 +522,13 @@ export default function VintedDashboard() {
   const [titleTab, setTitleTab] = useState<"seo" | "court">("seo");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [view, setView] = useState<"pipeline" | "stock" | "analytics" | "labels">("pipeline");
+  const [view, setView] = useState<"pipeline" | "stock" | "analytics" | "labels" | "vinted_live">("pipeline");
   const [filter, setFilter] = useState<Status | "TOUT">("TOUT");
   const [query, setQuery] = useState("");
   const [syncState, setSyncState] = useState("Synchronisation en attente");
+  const [vintedUsername, setVintedUsername] = useState("durandflorian88");
+  const [vintedLiveTab, setVintedLiveTab] = useState<"sales" | "online" | "import">("sales");
+  const [vintedImportText, setVintedImportText] = useState("");
   const [shippingLabels, setShippingLabels] = useState<ShippingLabel[]>([]);
   const [activeShippingIndex, setActiveShippingIndex] = useState(0);
   const [shippingError, setShippingError] = useState("");
@@ -534,7 +537,7 @@ export default function VintedDashboard() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [cmdQuery, setCmdQuery] = useState("");
   const [buyerReplyType, setBuyerReplyType] = useState<"nego" | "dispo" | "dernier_prix" | "envoi">("nego");
-  const [carrierPreset, setCarrierPreset] = useState<"auto" | "chronopost" | "mondial" | "colissimo" | "full">("auto");
+  const [carrierPreset, setCarrierPreset] = useState<"auto" | "chronopost" | "mondial" | "colissimo" | "left" | "full">("auto");
   const originalPhotosRef = useRef<Map<string, string>>(new Map());
   const syncQueue = useRef<Promise<void>>(Promise.resolve());
   const supabaseRef = useRef<SupabaseClient | null>(null);
@@ -1060,55 +1063,57 @@ export default function VintedDashboard() {
   }
 
   function getCarrierCoordinates(
-    carrier: "chronopost" | "mondial" | "colissimo" | "full",
+    carrier: "chronopost" | "mondial" | "colissimo" | "left" | "full",
     w: number,
     h: number
   ) {
-    if (carrier === "chronopost") {
-      // Chronopost / Shop2Shop : Colonne de droite A4 (de ~50% à 99% de largeur)
-      const labelW = Math.floor(w * 0.485);
+    if (carrier === "chronopost" || carrier === "mondial") {
+      // Pour Mondial Relay et Chronopost Vinted A4 : TOUT À DROITE, début en haut
+      // Largeur = 49% de la feuille A4 (de 50% à 99%)
+      // Hauteur = ratio 2:3 (100x150mm thermique)
+      const labelW = Math.floor(w * 0.495);
       const labelH = Math.floor(labelW * 1.5);
       return {
         cropArea: {
-          x: Math.floor(w * 0.505),
-          y: Math.floor(h * 0.015),
+          x: Math.floor(w * 0.495),
+          y: Math.floor(h * 0.012),
           width: labelW,
           height: Math.min(h, labelH),
         },
-        crop: { x: -160, y: 110 },
-        zoom: 2.1,
-      };
-    }
-
-    if (carrier === "mondial") {
-      // Mondial Relay standard A4 : colonne de gauche (ou haut-gauche)
-      const labelW = Math.floor(w * 0.49);
-      const labelH = Math.floor(labelW * 1.5);
-      return {
-        cropArea: {
-          x: Math.floor(w * 0.02),
-          y: Math.floor(h * 0.015),
-          width: labelW,
-          height: Math.min(h, labelH),
-        },
-        crop: { x: 160, y: 110 },
-        zoom: 2.1,
+        crop: { x: -175, y: 135 },
+        zoom: 2.15,
       };
     }
 
     if (carrier === "colissimo") {
       // Colissimo / La Poste : haut centré
-      const labelW = Math.floor(w * 0.76);
+      const labelW = Math.floor(w * 0.78);
       const labelH = Math.floor(labelW * 1.5);
       return {
         cropArea: {
-          x: Math.floor(w * 0.12),
-          y: Math.floor(h * 0.02),
+          x: Math.floor(w * 0.11),
+          y: Math.floor(h * 0.015),
           width: labelW,
           height: Math.min(h, labelH),
         },
-        crop: { x: 0, y: 120 },
+        crop: { x: 0, y: 125 },
         zoom: 1.35,
+      };
+    }
+
+    if (carrier === "left") {
+      // Fiche de gauche (à l'intérieur du colis)
+      const labelW = Math.floor(w * 0.49);
+      const labelH = Math.floor(labelW * 1.5);
+      return {
+        cropArea: {
+          x: Math.floor(w * 0.01),
+          y: Math.floor(h * 0.012),
+          width: labelW,
+          height: Math.min(h, labelH),
+        },
+        crop: { x: 175, y: 125 },
+        zoom: 2.15,
       };
     }
 
@@ -1124,6 +1129,82 @@ export default function VintedDashboard() {
       crop: { x: 0, y: 0 },
       zoom: 1,
     };
+  }
+
+  function nudgeCrop(dx: number, dy: number, dZoom = 0) {
+    const active = shippingLabels[activeShippingIndex];
+    if (!active) return;
+    const newCrop = {
+      x: Math.round((active.crop?.x ?? 0) + dx),
+      y: Math.round((active.crop?.y ?? 0) + dy),
+    };
+    const newZoom = Math.max(1, Math.min(4, Number(((active.zoom ?? 1) + dZoom).toFixed(2))));
+    updateShippingLabel(active.id, { crop: newCrop, zoom: newZoom });
+  }
+
+  async function rotateShippingLabel(id: string) {
+    const active = shippingLabels.find((l) => l.id === id);
+    if (!active) return;
+    const img = new window.Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.height;
+      canvas.height = img.width;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((90 * Math.PI) / 180);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      const newImageData = canvas.toDataURL("image/png");
+      void autoDetectLabelCrop(newImageData).then((res) => {
+        updateShippingLabel(id, {
+          image: newImageData,
+          cropArea: res.cropArea,
+          crop: res.crop,
+          zoom: res.zoom,
+        });
+        toast.success("Bordereau pivoté de 90° !");
+      });
+    };
+    img.src = active.image;
+  }
+
+  function recordLiveSale(sku: string, salePrice: number, buyer = "") {
+    const entry = history.find((item) => item.sku_id === sku);
+    if (!entry) return;
+    updateListing(sku, {
+      statut: "VENDU",
+      prix_vendu: salePrice,
+      date_vente: new Date().toISOString(),
+    });
+    toast.success(`Vente enregistrée : ${sku} (${entry.marque} ${entry.modele})`, {
+      description: `Montant encaissé : ${euro(salePrice)} ${buyer ? `· Acheteur : ${buyer}` : ""}`,
+    });
+  }
+
+  function handleVintedSaleImport() {
+    if (!vintedImportText.trim()) return;
+    const text = vintedImportText.trim();
+    const priceMatch = text.match(/(\d+([.,]\d{1,2})?)\s*(€|eur|euros)/i);
+    const parsedPrice = priceMatch ? parseFloat(priceMatch[1].replace(",", ".")) : undefined;
+
+    const onlineItems = history.filter((i) => i.statut === "EN_LIGNE" || i.statut === "PRET_A_PUBLIER");
+    let matchedItem = onlineItems.find((i) => text.toLowerCase().includes(i.sku_id.toLowerCase()));
+
+    if (!matchedItem) {
+      matchedItem = onlineItems.find((i) => i.marque && text.toLowerCase().includes(i.marque.toLowerCase()));
+    }
+
+    if (matchedItem) {
+      const finalPrice = parsedPrice || matchedItem.market_verdict?.prix_affiche_recommande || matchedItem.prix_revente;
+      recordLiveSale(matchedItem.sku_id, finalPrice);
+      setVintedImportText("");
+      toast.success(`Article ${matchedItem.sku_id} (${matchedItem.marque}) marqué comme vendu !`);
+    } else if (onlineItems.length > 0) {
+      toast.info("Aucun article exact identifié automatiquement. Cliquez sur 'Noter vendu' sur l'article concerné ci-dessous.");
+    } else {
+      toast.error("Aucun article en ligne trouvé dans votre stock.");
+    }
   }
 
   async function autoDetectLabelCrop(imageUrl: string): Promise<{
@@ -1200,7 +1281,7 @@ export default function VintedDashboard() {
     });
   }
 
-  function applyCarrierPreset(carrier: "auto" | "mondial" | "chronopost" | "colissimo" | "full") {
+  function applyCarrierPreset(carrier: "auto" | "mondial" | "chronopost" | "colissimo" | "left" | "full") {
     setCarrierPreset(carrier);
     const active = shippingLabels[activeShippingIndex];
     if (!active) return;
@@ -1223,9 +1304,10 @@ export default function VintedDashboard() {
       const res = getCarrierCoordinates(carrier, w, h);
       updateShippingLabel(active.id, { cropArea: res.cropArea, crop: res.crop, zoom: res.zoom });
       const labels = {
-        chronopost: "⚡ Chronopost / Shop2Shop (Colonne Droite)",
-        mondial: "📦 Mondial Relay (Colonne Gauche)",
+        chronopost: "⚡ Chronopost / Shop2Shop (Tout à droite)",
+        mondial: "📦 Mondial Relay (Tout à droite)",
         colissimo: "📮 Colissimo (Haut Centré)",
+        left: "📄 Fiche Destinataire (Gauche)",
         full: "📐 Plein Format",
       };
       toast.success(`Cadrage ${labels[carrier]} appliqué !`);
@@ -1991,6 +2073,12 @@ export default function VintedDashboard() {
         <nav className="view-tabs" aria-label="Vues du tableau de bord">
           <button className={view === "pipeline" ? "selected" : ""} onClick={() => setView("pipeline")}><Sparkles className="size-4" /> Pipeline IA</button>
           <button className={view === "stock" ? "selected" : ""} onClick={() => setView("stock")}><PackageCheck className="size-4" /> Stock & historique <span className="tab-count">{history.length}</span></button>
+          <button className={view === "vinted_live" ? "selected" : ""} onClick={() => setView("vinted_live")}>
+            <ExternalLink className="size-4" /> Ventes Vinted Live
+            {history.filter((h) => h.statut === "VENDU").length > 0 && (
+              <span className="tab-count text-emerald-400 font-bold">{history.filter((h) => h.statut === "VENDU").length}</span>
+            )}
+          </button>
           <button className={view === "analytics" ? "selected" : ""} onClick={() => setView("analytics")}><TrendingUp className="size-4" /> Analyses</button>
           <button className={view === "labels" ? "selected" : ""} onClick={() => setView("labels")}><Barcode className="size-4" /> Étiquettes</button>
           <span className="sync-indicator"><i />{syncState}</span>
@@ -2725,6 +2813,252 @@ export default function VintedDashboard() {
             <div className="analytics-metrics"><article><span>Profit net réalisé</span><strong className={globalProfit < 0 ? "text-red-300" : "green-text"}>{euro(globalProfit)}</strong><small>{estimatedFeeCount ? "inclut des frais estimés" : "frais réels renseignés"}</small></article><article><span>Articles vendus</span><strong>{soldEntries.length}</strong><small>sur {history.length} articles suivis</small></article><article><span>Taux d&apos;écoulement</span><strong>{sellThroughRate}%</strong><small>part du stock déjà vendue</small></article><article><span>Délai moyen de vente</span><strong>{averageDaysToSale === null ? "—" : `${averageDaysToSale} j`}</strong><small>{saleDurations.length} ventes datées</small></article></div>
             <div className="category-performance"><div className="checklist-heading"><span>PERFORMANCE PAR CATÉGORIE</span><strong>{categoryPerformance.length} catégories</strong></div>{categoryPerformance.length ? categoryPerformance.map((category) => <div className="category-row" key={category.name}><span>{category.name}</span><small>{category.count} article{category.count > 1 ? "s" : ""}</small><b className={category.profit < 0 ? "text-red-300" : "green-text"}>{euro(category.profit)}</b></div>) : <p>Aucune donnée de vente pour le moment.</p>}</div>
           </section>
+        ) : view === "vinted_live" ? (
+          <section className="vinted-live-layout">
+            <div className="panel vinted-live-panel">
+              <div className="stock-heading">
+                <div>
+                  <span className="step-label">VINTED LIVE DESK</span>
+                  <h2>Ventes en Direct & Dressing Vinted</h2>
+                  <p>Suivez vos ventes, encaissements et préparez les envois sans quitter le cockpit.</p>
+                </div>
+                <div className="heading-actions">
+                  <a
+                    href={`https://www.vinted.fr/member/${vintedUsername.replace("@", "")}?tab=closet`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="secondary-button"
+                  >
+                    <ExternalLink className="size-4" /> Voir mon Dressing Vinted
+                  </a>
+                </div>
+              </div>
+
+              {/* Dressing Connection & Direct Links */}
+              <div className="vinted-dressing-bar">
+                <div className="vinted-dressing-input">
+                  <Tag className="size-4 text-emerald-400 shrink-0" />
+                  <input
+                    type="text"
+                    value={vintedUsername}
+                    onChange={(e) => setVintedUsername(e.target.value)}
+                    placeholder="Votre pseudo ou ID Vinted (ex: durandflorian88)"
+                    title="Pseudo Vinted pour les accès directs"
+                  />
+                </div>
+                <div className="vinted-dressing-links">
+                  <a
+                    href="https://www.vinted.fr/inbox"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="secondary-button !h-8 !text-[10px]"
+                  >
+                    💬 Messages & Ventes Vinted
+                  </a>
+                  <a
+                    href="https://www.vinted.fr/wallet"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="secondary-button !h-8 !text-[10px]"
+                  >
+                    💳 Mon Porte-monnaie Vinted
+                  </a>
+                </div>
+              </div>
+
+              {/* Live KPI Grid */}
+              <div className="vinted-live-grid">
+                <article>
+                  <span>Articles Vendus</span>
+                  <strong>{history.filter((i) => i.statut === "VENDU").length}</strong>
+                  <small>sur {history.length} pièces au total</small>
+                </article>
+                <article>
+                  <span>CA Encaissé</span>
+                  <strong className="text-emerald-400">
+                    {euro(
+                      history
+                        .filter((i) => i.statut === "VENDU")
+                        .reduce((acc, i) => acc + (i.prix_vendu || i.prix_revente || 0), 0)
+                    )}
+                  </strong>
+                  <small>total des ventes cumulées</small>
+                </article>
+                <article>
+                  <span>Bénéfice Net Réalisé</span>
+                  <strong className={globalProfit < 0 ? "text-red-300" : "text-emerald-400"}>
+                    {euro(globalProfit)}
+                  </strong>
+                  <small>marge nette après coûts d&apos;achat</small>
+                </article>
+                <article>
+                  <span>Articles en Ligne Actifs</span>
+                  <strong className="text-blue-400">
+                    {history.filter((i) => i.statut === "EN_LIGNE").length}
+                  </strong>
+                  <small>visibles actuellement sur Vinted</small>
+                </article>
+              </div>
+
+              {/* Navigation Tabs */}
+              <div className="vinted-live-tabs">
+                <button
+                  type="button"
+                  className={`vinted-live-tab-btn ${vintedLiveTab === "sales" ? "active" : ""}`}
+                  onClick={() => setVintedLiveTab("sales")}
+                >
+                  <PackageCheck className="size-3.5" />
+                  Articles Vendus ({history.filter((i) => i.statut === "VENDU").length})
+                </button>
+                <button
+                  type="button"
+                  className={`vinted-live-tab-btn ${vintedLiveTab === "online" ? "active" : ""}`}
+                  onClick={() => setVintedLiveTab("online")}
+                >
+                  <Tag className="size-3.5 text-blue-400" />
+                  Articles en Ligne ({history.filter((i) => i.statut === "EN_LIGNE").length})
+                </button>
+                <button
+                  type="button"
+                  className={`vinted-live-tab-btn ${vintedLiveTab === "import" ? "active" : ""}`}
+                  onClick={() => setVintedLiveTab("import")}
+                >
+                  <Sparkles className="size-3.5 text-amber-400" />
+                  Enregistrer une Vente Express
+                </button>
+              </div>
+
+              {/* Tab 1: Articles Vendus */}
+              {vintedLiveTab === "sales" && (
+                <div>
+                  {history.filter((i) => i.statut === "VENDU").length ? (
+                    history
+                      .filter((i) => i.statut === "VENDU")
+                      .map((item) => (
+                        <div className="vinted-sold-card" key={item.sku_id}>
+                          <div className="vinted-sold-info">
+                            <div className="flex items-center gap-2">
+                              <span className="sku-tag">{item.sku_id}</span>
+                              <strong>
+                                {item.marque} {item.modele}
+                              </strong>
+                              <span className="vinted-sold-badge">✓ VENDU</span>
+                            </div>
+                            <span>
+                              Taille : {item.taille || "N/A"} · Acheté {euro(item.cta_ttc)} · Encaissé :{" "}
+                              <b className="text-emerald-400">{euro(item.prix_vendu || item.prix_revente)}</b>
+                              {item.date_vente && ` · Vendu le ${new Date(item.date_vente).toLocaleDateString("fr-FR")}`}
+                            </span>
+                          </div>
+                          <div className="vinted-sold-actions">
+                            <span className="font-mono text-xs font-bold text-emerald-400">
+                              + {euro((item.prix_vendu || item.prix_revente) - item.cta_ttc - (item.frais_reels || 0))} net
+                            </span>
+                            <button
+                              type="button"
+                              className="secondary-button !h-8 !text-[10px]"
+                              onClick={() => {
+                                setView("labels");
+                                setQuery(item.sku_id);
+                              }}
+                              title="Imprimer l'étiquette QR ou préparer le bordereau"
+                            >
+                              <Printer className="size-3.5" /> Bordereau
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                  ) : (
+                    <div className="empty-stock">
+                      <Clipboard className="size-6" />
+                      <strong>Aucune vente enregistrée pour le moment.</strong>
+                      <span>Dès qu&apos;un article en ligne est vendu, marquez-le en 1 clic pour suivre vos gains.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 2: Articles Actuellement en Ligne */}
+              {vintedLiveTab === "online" && (
+                <div>
+                  {history.filter((i) => i.statut === "EN_LIGNE").length ? (
+                    history
+                      .filter((i) => i.statut === "EN_LIGNE")
+                      .map((item) => (
+                        <div className="vinted-sold-card" key={item.sku_id}>
+                          <div className="vinted-sold-info">
+                            <div className="flex items-center gap-2">
+                              <span className="sku-tag">{item.sku_id}</span>
+                              <strong>
+                                {item.marque} {item.modele}
+                              </strong>
+                              <span className="text-[9px] text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20">
+                                EN LIGNE SUR VINTED
+                              </span>
+                            </div>
+                            <span>
+                              Taille : {item.taille || "N/A"} · Prix affiché : <b>{euro(item.prix_affiche || item.prix_revente)}</b> · Prix min : {euro(item.prix_min_x2)}
+                            </span>
+                          </div>
+                          <div className="vinted-sold-actions">
+                            <button
+                              type="button"
+                              className="primary-button !h-8 !text-[10px] !bg-emerald-600 hover:!bg-emerald-500"
+                              onClick={() => {
+                                const saleAmount = prompt(
+                                  `Montant réellement encaissé pour ${item.sku_id} (€) :`,
+                                  String(item.market_verdict?.prix_affiche_recommande ?? item.prix_revente ?? item.prix_affiche)
+                                );
+                                if (saleAmount && !isNaN(Number(saleAmount))) {
+                                  recordLiveSale(item.sku_id, Number(saleAmount));
+                                }
+                              }}
+                              title="Marquer comme vendu dès qu'une commande est confirmée"
+                            >
+                              ⚡ Noter Vendu
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                  ) : (
+                    <div className="empty-stock">
+                      <Tag className="size-6 text-zinc-500" />
+                      <strong>Aucun article actuellement marqué &quot;En ligne&quot;.</strong>
+                      <span>Passez vos articles prêts au statut &quot;En ligne&quot; dans l&apos;inventaire.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 3: Enregistrer une Vente via Copier-Coller / Notification */}
+              {vintedLiveTab === "import" && (
+                <div className="vinted-import-box">
+                  <div>
+                    <strong className="text-xs text-zinc-200">Coller la notification ou l&apos;email de vente Vinted :</strong>
+                    <p className="text-[10px] text-zinc-400 mt-1">
+                      Exemple : &quot;Félicitations ! Vous avez vendu Veste Carhartt pour 45.00 € à pierre_vinted.&quot; L&apos;IA détecte automatiquement l&apos;article et enregistre la vente dans votre comptabilité.
+                    </p>
+                  </div>
+                  <textarea
+                    className="vinted-import-textarea"
+                    placeholder="Collez ici le texte de votre vente Vinted..."
+                    value={vintedImportText}
+                    onChange={(e) => setVintedImportText(e.target.value)}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={handleVintedSaleImport}
+                      disabled={!vintedImportText.trim()}
+                    >
+                      <Sparkles className="size-3.5" /> Enregistrer la vente automatiquement
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
         ) : (
           <section className="labels-layout">
             <div className="panel labels-panel">
@@ -2768,19 +3102,19 @@ export default function VintedDashboard() {
                       </button>
                       <button
                         type="button"
-                        className={`carrier-pill ${carrierPreset === "chronopost" ? "active" : ""}`}
-                        onClick={() => applyCarrierPreset("chronopost")}
-                        title="Bordereau Chronopost / Shop2Shop (Colonne Droite)"
+                        className={`carrier-pill ${carrierPreset === "mondial" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("mondial")}
+                        title="Bordereau Mondial Relay Vinted (Tout à droite, haut)"
                       >
-                        ⚡ Chronopost / Shop2Shop
+                        📦 Mondial Relay (Tout à droite)
                       </button>
                       <button
                         type="button"
-                        className={`carrier-pill ${carrierPreset === "mondial" ? "active" : ""}`}
-                        onClick={() => applyCarrierPreset("mondial")}
-                        title="Bordereau Mondial Relay A4 standard (Colonne Gauche)"
+                        className={`carrier-pill ${carrierPreset === "chronopost" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("chronopost")}
+                        title="Bordereau Chronopost / Shop2Shop (Tout à droite, haut)"
                       >
-                        📦 Mondial Relay
+                        ⚡ Chronopost (Tout à droite)
                       </button>
                       <button
                         type="button"
@@ -2789,6 +3123,14 @@ export default function VintedDashboard() {
                         title="Bordereau Colissimo / La Poste (Haut Centré)"
                       >
                         📮 Colissimo
+                      </button>
+                      <button
+                        type="button"
+                        className={`carrier-pill ${carrierPreset === "left" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("left")}
+                        title="Fiche destinataire (Colonne de gauche)"
+                      >
+                        📄 Fiche Gauche
                       </button>
                       <button
                         type="button"
@@ -2812,6 +3154,24 @@ export default function VintedDashboard() {
                       onCropComplete={(_, pixels) => updateShippingLabel(activeShippingLabel.id, { cropArea: pixels })}
                     />
                   </div>
+
+                  {/* Barre d'ajustement rapide et rotation */}
+                  <div className="cropper-nudge-bar">
+                    <div className="nudge-group">
+                      <span className="text-[9px] text-zinc-400 font-medium">Déplacer :</span>
+                      <button type="button" className="nudge-btn" onClick={() => nudgeCrop(15, 0)} title="Déplacer vers la gauche">⬅️ Gauche</button>
+                      <button type="button" className="nudge-btn" onClick={() => nudgeCrop(-15, 0)} title="Déplacer vers la droite">➡️ Droite</button>
+                      <button type="button" className="nudge-btn" onClick={() => nudgeCrop(0, 15)} title="Déplacer vers le haut">⬆️ Haut</button>
+                      <button type="button" className="nudge-btn" onClick={() => nudgeCrop(0, -15)} title="Déplacer vers le bas">⬇️ Bas</button>
+                    </div>
+                    <div className="nudge-group">
+                      <span className="text-[9px] text-zinc-400 font-medium">Zoom :</span>
+                      <button type="button" className="nudge-btn" onClick={() => nudgeCrop(0, 0, 0.1)} title="Zoomer">➕</button>
+                      <button type="button" className="nudge-btn" onClick={() => nudgeCrop(0, 0, -0.1)} title="Dézoomer">➖</button>
+                      <button type="button" className="nudge-btn text-emerald-400" onClick={() => void rotateShippingLabel(activeShippingLabel.id)} title="Pivoter le bordereau de 90°">🔄 Tourner 90°</button>
+                    </div>
+                  </div>
+
                   <label className="zoom-control">
                     <span>Ajuster le cadrage manuel</span>
                     <input
