@@ -534,6 +534,7 @@ export default function VintedDashboard() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [cmdQuery, setCmdQuery] = useState("");
   const [buyerReplyType, setBuyerReplyType] = useState<"nego" | "dispo" | "dernier_prix" | "envoi">("nego");
+  const [carrierPreset, setCarrierPreset] = useState<"auto" | "chronopost" | "mondial" | "colissimo" | "full">("auto");
   const originalPhotosRef = useRef<Map<string, string>>(new Map());
   const syncQueue = useRef<Promise<void>>(Promise.resolve());
   const supabaseRef = useRef<SupabaseClient | null>(null);
@@ -1058,10 +1059,78 @@ export default function VintedDashboard() {
     }
   }
 
+  function getCarrierCoordinates(
+    carrier: "chronopost" | "mondial" | "colissimo" | "full",
+    w: number,
+    h: number
+  ) {
+    if (carrier === "chronopost") {
+      // Chronopost / Shop2Shop : Colonne de droite A4 (de ~50% à 99% de largeur)
+      const labelW = Math.floor(w * 0.485);
+      const labelH = Math.floor(labelW * 1.5);
+      return {
+        cropArea: {
+          x: Math.floor(w * 0.505),
+          y: Math.floor(h * 0.015),
+          width: labelW,
+          height: Math.min(h, labelH),
+        },
+        crop: { x: -160, y: 110 },
+        zoom: 2.1,
+      };
+    }
+
+    if (carrier === "mondial") {
+      // Mondial Relay standard A4 : colonne de gauche (ou haut-gauche)
+      const labelW = Math.floor(w * 0.49);
+      const labelH = Math.floor(labelW * 1.5);
+      return {
+        cropArea: {
+          x: Math.floor(w * 0.02),
+          y: Math.floor(h * 0.015),
+          width: labelW,
+          height: Math.min(h, labelH),
+        },
+        crop: { x: 160, y: 110 },
+        zoom: 2.1,
+      };
+    }
+
+    if (carrier === "colissimo") {
+      // Colissimo / La Poste : haut centré
+      const labelW = Math.floor(w * 0.76);
+      const labelH = Math.floor(labelW * 1.5);
+      return {
+        cropArea: {
+          x: Math.floor(w * 0.12),
+          y: Math.floor(h * 0.02),
+          width: labelW,
+          height: Math.min(h, labelH),
+        },
+        crop: { x: 0, y: 120 },
+        zoom: 1.35,
+      };
+    }
+
+    // Format plein
+    const labelH = Math.min(h, Math.floor(w * 1.5));
+    return {
+      cropArea: {
+        x: 0,
+        y: 0,
+        width: w,
+        height: labelH,
+      },
+      crop: { x: 0, y: 0 },
+      zoom: 1,
+    };
+  }
+
   async function autoDetectLabelCrop(imageUrl: string): Promise<{
     cropArea: { x: number; y: number; width: number; height: number };
     crop: { x: number; y: number };
     zoom: number;
+    detectedCarrier?: string;
   }> {
     return new Promise((resolve) => {
       const img = new window.Image();
@@ -1077,143 +1146,89 @@ export default function VintedDashboard() {
         canvas.height = sh;
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) {
-          const cropW = Math.floor(w * 0.88);
-          const cropH = Math.floor(cropW * 1.5);
-          resolve({
-            cropArea: { x: Math.floor(w * 0.06), y: Math.floor(h * 0.03), width: cropW, height: Math.min(h, cropH) },
-            crop: { x: 0, y: 140 },
-            zoom: 1.25,
-          });
+          resolve(getCarrierCoordinates("chronopost", w, h));
           return;
         }
         ctx.drawImage(img, 0, 0, sw, sh);
         const imgData = ctx.getImageData(0, 0, sw, sh);
         const data = imgData.data;
 
-        // Un bordereau de transport sur un A4 se trouve dans les 72% supérieurs
-        const maxScanY = Math.floor(sh * 0.72);
-        let minX = sw, maxX = 0, minY = sh, maxY = 0;
-        let darkCount = 0;
+        // Analyser la répartition gauche vs droite dans les 75% supérieurs
+        const midX = Math.floor(sw / 2);
+        const maxScanY = Math.floor(sh * 0.75);
+        let leftDark = 0;
+        let rightDark = 0;
 
-        for (let y = Math.floor(sh * 0.02); y < maxScanY; y += 2) {
-          for (let x = Math.floor(sw * 0.02); x < sw - Math.floor(sw * 0.02); x += 2) {
+        for (let y = Math.floor(sh * 0.03); y < maxScanY; y += 3) {
+          for (let x = Math.floor(sw * 0.05); x < sw - Math.floor(sw * 0.05); x += 3) {
             const idx = (y * sw + x) * 4;
             const r = data[idx];
             const g = data[idx + 1];
             const b = data[idx + 2];
-            if (r < 160 && g < 160 && b < 160) {
-              darkCount++;
-              if (x < minX) minX = x;
-              if (x > maxX) maxX = x;
-              if (y < minY) minY = y;
-              if (y > maxY) maxY = y;
+            if (r < 155 && g < 155 && b < 155) {
+              if (x > midX + 10) {
+                rightDark++;
+              } else if (x < midX - 10) {
+                leftDark++;
+              }
             }
           }
         }
 
-        if (darkCount > 80 && maxX > minX && maxY > minY) {
-          let realMinX = Math.floor(minX / scale);
-          let realMaxX = Math.floor(maxX / scale);
-          let realMinY = Math.floor(minY / scale);
-          let realMaxY = Math.floor(maxY / scale);
-
-          const padX = Math.floor(w * 0.025);
-          const padY = Math.floor(h * 0.02);
-          realMinX = Math.max(0, realMinX - padX);
-          realMaxX = Math.min(w, realMaxX + padX);
-          realMinY = Math.max(0, realMinY - padY);
-          realMaxY = Math.min(h, realMaxY + padY);
-
-          let boxW = realMaxX - realMinX;
-          let boxH = realMaxY - realMinY;
-
-          const targetAspect = 2 / 3;
-          const currentAspect = boxW / boxH;
-
-          if (currentAspect > targetAspect) {
-            boxH = Math.floor(boxW / targetAspect);
-            if (realMinY + boxH > h) {
-              realMinY = Math.max(0, h - boxH);
-            }
-          } else {
-            boxW = Math.floor(boxH * targetAspect);
-            if (realMinX + boxW > w) {
-              realMinX = Math.max(0, w - boxW);
-            }
-          }
-
-          const cropW = Math.min(w - realMinX, boxW);
-          const cropH = Math.min(h - realMinY, boxH);
-          resolve({
-            cropArea: { x: realMinX, y: realMinY, width: cropW, height: cropH },
-            crop: { x: 0, y: Math.round((h / 2 - (realMinY + cropH / 2)) * 0.38) },
-            zoom: Math.max(1, Math.min(2.4, w / cropW)),
-          });
-        } else {
-          const targetW = Math.floor(w * 0.88);
-          const targetH = Math.floor(targetW * 1.5);
-          resolve({
-            cropArea: { x: Math.floor(w * 0.06), y: Math.floor(h * 0.03), width: targetW, height: Math.min(h, targetH) },
-            crop: { x: 0, y: 140 },
-            zoom: 1.25,
-          });
+        // Si la colonne de droite contient le bordereau principal (ex: Chronopost / Shop2Shop avec v-chronopost et grand code-barres)
+        if (rightDark > 120 && (rightDark >= leftDark * 0.65 || rightDark > 220)) {
+          const res = getCarrierCoordinates("chronopost", w, h);
+          resolve({ ...res, detectedCarrier: "Chronopost / Shop2Shop" });
+          return;
         }
+
+        // Si la colonne de gauche contient le bordereau principal (ex: Mondial Relay 2 colonnes)
+        if (leftDark > 150 && rightDark < 80) {
+          const res = getCarrierCoordinates("mondial", w, h);
+          resolve({ ...res, detectedCarrier: "Mondial Relay" });
+          return;
+        }
+
+        // Sinon bordereau haut centré
+        const res = getCarrierCoordinates("colissimo", w, h);
+        resolve({ ...res, detectedCarrier: "Colissimo / Centré" });
       };
       img.onerror = () => {
-        resolve({
-          cropArea: { x: 0, y: 0, width: 800, height: 1200 },
-          crop: { x: 0, y: 0 },
-          zoom: 1,
-        });
+        resolve(getCarrierCoordinates("chronopost", 1000, 1500));
       };
       img.src = imageUrl;
     });
   }
 
   function applyCarrierPreset(carrier: "auto" | "mondial" | "chronopost" | "colissimo" | "full") {
+    setCarrierPreset(carrier);
     const active = shippingLabels[activeShippingIndex];
     if (!active) return;
     const img = new window.Image();
     img.onload = () => {
       const w = img.naturalWidth || img.width;
       const h = img.naturalHeight || img.height;
-      let newCropArea = { x: 0, y: 0, width: w, height: h };
-      let newCrop = { x: 0, y: 0 };
-      let newZoom = 1;
 
-      if (carrier === "mondial") {
-        const cropW = Math.floor(w * 0.86);
-        const cropH = Math.floor(cropW * 1.5);
-        newCropArea = { x: Math.floor(w * 0.05), y: Math.floor(h * 0.02), width: cropW, height: Math.min(h, cropH) };
-        newCrop = { x: 0, y: 150 };
-        newZoom = 1.28;
-      } else if (carrier === "chronopost") {
-        const cropW = Math.floor(w * 0.90);
-        const cropH = Math.floor(cropW * 1.5);
-        newCropArea = { x: Math.floor(w * 0.05), y: Math.floor(h * 0.04), width: cropW, height: Math.min(h, cropH) };
-        newCrop = { x: 0, y: 130 };
-        newZoom = 1.22;
-      } else if (carrier === "colissimo") {
-        const cropW = Math.floor(w * 0.92);
-        const cropH = Math.floor(cropW * 1.5);
-        newCropArea = { x: Math.floor(w * 0.04), y: Math.floor(h * 0.03), width: cropW, height: Math.min(h, cropH) };
-        newCrop = { x: 0, y: 120 };
-        newZoom = 1.2;
-      } else if (carrier === "auto") {
+      if (carrier === "auto") {
         void autoDetectLabelCrop(active.image).then((res) => {
           updateShippingLabel(active.id, { cropArea: res.cropArea, crop: res.crop, zoom: res.zoom });
-          toast.success("Auto-recadrage intelligent appliqué !");
+          if (res.detectedCarrier?.includes("Chronopost")) setCarrierPreset("chronopost");
+          else if (res.detectedCarrier?.includes("Mondial")) setCarrierPreset("mondial");
+          else if (res.detectedCarrier?.includes("Colissimo")) setCarrierPreset("colissimo");
+          toast.success(`Auto-détection : ${res.detectedCarrier || "Bordereau"} cadré avec succès !`);
         });
         return;
-      } else {
-        const cropH = Math.min(h, Math.floor(w * 1.5));
-        newCropArea = { x: 0, y: 0, width: w, height: cropH };
-        newCrop = { x: 0, y: 0 };
-        newZoom = 1;
       }
 
-      updateShippingLabel(active.id, { cropArea: newCropArea, crop: newCrop, zoom: newZoom });
-      toast.success(`Preset ${carrier.toUpperCase()} appliqué !`);
+      const res = getCarrierCoordinates(carrier, w, h);
+      updateShippingLabel(active.id, { cropArea: res.cropArea, crop: res.crop, zoom: res.zoom });
+      const labels = {
+        chronopost: "⚡ Chronopost / Shop2Shop (Colonne Droite)",
+        mondial: "📦 Mondial Relay (Colonne Gauche)",
+        colissimo: "📮 Colissimo (Haut Centré)",
+        full: "📐 Plein Format",
+      };
+      toast.success(`Cadrage ${labels[carrier]} appliqué !`);
     };
     img.src = active.image;
   }
@@ -1439,6 +1454,9 @@ export default function VintedDashboard() {
       throw new Error(`Format non pris en charge : ${file.name}.`);
     }
     const autoCrop = await autoDetectLabelCrop(imageData);
+    if (autoCrop.detectedCarrier?.includes("Chronopost")) setCarrierPreset("chronopost");
+    else if (autoCrop.detectedCarrier?.includes("Mondial")) setCarrierPreset("mondial");
+    else if (autoCrop.detectedCarrier?.includes("Colissimo")) setCarrierPreset("colissimo");
     return {
       id: crypto.randomUUID(),
       name: file.name,
@@ -2740,19 +2758,44 @@ export default function VintedDashboard() {
                       <Sparkles className="size-3.5" /> Auto-Crop Transporteur :
                     </span>
                     <div className="carrier-presets-list">
-                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("auto")} title="Détecter automatiquement l'étiquette">
+                      <button
+                        type="button"
+                        className={`carrier-pill ${carrierPreset === "auto" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("auto")}
+                        title="Détecter automatiquement l'emplacement de l'étiquette"
+                      >
                         🎯 Auto-Détecter
                       </button>
-                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("mondial")} title="Format Mondial Relay standard A4">
+                      <button
+                        type="button"
+                        className={`carrier-pill ${carrierPreset === "chronopost" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("chronopost")}
+                        title="Bordereau Chronopost / Shop2Shop (Colonne Droite)"
+                      >
+                        ⚡ Chronopost / Shop2Shop
+                      </button>
+                      <button
+                        type="button"
+                        className={`carrier-pill ${carrierPreset === "mondial" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("mondial")}
+                        title="Bordereau Mondial Relay A4 standard (Colonne Gauche)"
+                      >
                         📦 Mondial Relay
                       </button>
-                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("chronopost")} title="Format Chronopost / Shop2Shop">
-                        ⚡ Chronopost
-                      </button>
-                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("colissimo")} title="Format Colissimo / La Poste">
+                      <button
+                        type="button"
+                        className={`carrier-pill ${carrierPreset === "colissimo" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("colissimo")}
+                        title="Bordereau Colissimo / La Poste (Haut Centré)"
+                      >
                         📮 Colissimo
                       </button>
-                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("full")} title="Format brut complet">
+                      <button
+                        type="button"
+                        className={`carrier-pill ${carrierPreset === "full" ? "active" : ""}`}
+                        onClick={() => applyCarrierPreset("full")}
+                        title="Format brut complet"
+                      >
                         📐 Plein format
                       </button>
                     </div>
