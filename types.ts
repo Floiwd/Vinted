@@ -5,8 +5,24 @@ export interface DefectItem {
   confidence: number; // Score 0-100
 }
 
+export interface MarketVerdict {
+  verdict: "EXCELLENT_SOURCING" | "ACHAT_CORRECT" | "ACHAT_TROP_CHER";
+  verdict_label: string;
+  analyse: string;
+  prix_vente_rapide: number;
+  prix_marche_moyen: number;
+  prix_affiche_recommande: number;
+  prix_plancher: number;
+  contre_offre: number;
+  velocite: "TRES_RAPIDE" | "NORMALE" | "LENTE";
+  velocite_label: string;
+  conseil_rotation: string;
+}
+
 export interface ListingData {
   title: string;
+  titre_court?: string;
+  titre_seo?: string;
   description: string;
   estimatedPrice: string;
   brand: string;
@@ -15,6 +31,10 @@ export interface ListingData {
   category: string; // [NEW] Type/Catégorie
   colors: string[];
   defects?: DefectItem[];
+  defauts_observes?: string[];
+  defauts_transparence?: string;
+  hashtags?: string;
+  market_verdict?: MarketVerdict;
   purchasePrice?: string; // Prix d'achat utilisateur
   minPrice?: string; // [NEW] Prix min estimé
   maxPrice?: string; // [NEW] Prix max estimé

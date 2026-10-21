@@ -11,7 +11,7 @@ import type { AiProviderType, AiStatusSummary } from "@/lib/ai-provider";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ArrowDownToLine, ArrowRight, BadgeCheck, Barcode, Box, CalendarDays, Check, CheckCircle2, Clipboard, Clock3,
-  Copy, ExternalLink, FileText, ImagePlus, LockKeyhole, LogOut, Mail, MailCheck, MapPin,
+  Copy, ExternalLink, FileText, Flame, ImagePlus, LockKeyhole, LogOut, Mail, MailCheck, MapPin,
   PackageCheck, Plus, Printer, RefreshCw, ScanLine, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Tag,
   TrendingUp, Upload, Wallet, X, Zap,
 } from "lucide-react";
@@ -64,14 +64,30 @@ type Photo = { dataUrl: string; angle: string; name: string };
 type Checklist = { size: boolean; condition: boolean; material: boolean; photos: boolean; authenticity: boolean };
 type MarketSnapshot = { average: number | null; min: number | null; max: number | null; count: number; observed_at: string; source: string };
 type ShippingLabel = { id: string; name: string; image: string; crop: { x: number; y: number }; zoom: number; cropArea: { x: number; y: number; width: number; height: number } | null };
+type MarketVerdict = {
+  verdict: "EXCELLENT_SOURCING" | "ACHAT_CORRECT" | "ACHAT_TROP_CHER";
+  verdict_label: string;
+  analyse: string;
+  prix_vente_rapide: number;
+  prix_marche_moyen: number;
+  prix_affiche_recommande: number;
+  prix_plancher: number;
+  contre_offre: number;
+  velocite: "TRES_RAPIDE" | "NORMALE" | "LENTE";
+  velocite_label: string;
+  conseil_rotation: string;
+};
+
 type Listing = {
   sku_id: string; marque: string; modele: string; categorie: string; taille: string; etat: string;
   caracteristiques: string[]; mesures: Record<string, string | number> | null;
   authenticite: { niveau: string; indices: string[] }; confiance: number; prix_achat: number;
   cta_ttc: number; prix_min_x2: number; prix_affiche: number; prix_revente: number; marge_negociation_pct: number;
-  creneau_publi: string; created_at?: string; statut: Status; titre_seo: string; description: string; hashtags: string;
+  creneau_publi: string; created_at?: string; statut: Status; titre_seo: string; titre_court?: string; description: string; hashtags: string;
   message_nego: string; sync_sheet: boolean; prix_vendu?: number; frais_reels?: number;
-  checklist?: Checklist; market?: MarketSnapshot; date_publication?: string; date_vente?: string;
+  checklist?: Checklist; market?: MarketSnapshot; market_verdict?: MarketVerdict;
+  defauts_observes?: string[]; defauts_transparence?: string;
+  date_publication?: string; date_vente?: string;
   emplacement?: string; fournisseur?: string; date_achat?: string; date_limite_retour?: string;
   justificatif_nom?: string; justificatif_url?: string; updated_at?: string;
 };
@@ -482,6 +498,7 @@ export default function VintedDashboard() {
     date_limite_retour: "",
   });
   const [copied, setCopied] = useState<string | null>(null);
+  const [titleTab, setTitleTab] = useState<"seo" | "court">("seo");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [view, setView] = useState<"pipeline" | "stock" | "analytics" | "labels">("pipeline");
@@ -1135,6 +1152,9 @@ export default function VintedDashboard() {
   async function copyText(text: string, field: string) {
     try {
       await navigator.clipboard.writeText(text);
+      if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+        try { navigator.vibrate(25); } catch {}
+      }
       setCopied(field);
       window.setTimeout(() => setCopied(null), 1800);
     } catch {
@@ -1435,7 +1455,7 @@ export default function VintedDashboard() {
         <button className="icon-action lock-action" onClick={signOut} title="Se déconnecter" aria-label="Se déconnecter"><LogOut className="size-4" /><span>{signedInEmail || "Déconnexion"}</span></button>
       </header>
 
-      <div className="dashboard-content" id="top">
+      <div className={`dashboard-content ${result ? "has-sticky-bar" : ""}`} id="top">
         <section className="page-heading">
           <div><p className="eyebrow">COCKPIT DE REVENTE <span>·</span> {new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Le stock, <span>sous contrôle.</span></h1><p className="heading-copy">Analysez, arbitrez et préparez vos prochaines annonces depuis un seul poste.</p></div>
           <div className="heading-actions">
@@ -1575,27 +1595,334 @@ export default function VintedDashboard() {
             <div className="result-column">
               {result ? <>
                 <div className="panel result-panel">
-                  <div className="result-topline"><span className="step-label">02 / ARBITRAGE</span><span className={statusClass(result.statut)}><i />{STATUS_LABELS[result.statut]}</span></div>
-                  <div className="result-product"><div><span className="product-brand">{result.marque}</span><h2>{result.modele}</h2><p>{result.categorie} <span>·</span> Taille {result.taille} <span>·</span> {result.etat}</p></div><div className="display-price"><small>PRIX DE REVENTE RÉEL</small><strong>{euro(result.prix_revente ?? result.prix_affiche)}</strong><span>{result.prix_revente < result.prix_min_x2 ? "Alerte : au-dessous du plancher x2" : "Compatible avec le plancher x2"}</span></div></div>
-                  <div className="financial-grid"><div><span>Coût total d&apos;acquisition</span><strong>{euro(result.cta_ttc)}</strong><small>dont port & emballage</small></div><div><span>Plancher x2</span><strong className="green-text">{euro(result.prix_min_x2)}</strong><small>objectif de vente minimum</small></div><div><span>Prix réel conseillé</span><strong className="blue-text">{euro(result.prix_revente ?? result.prix_affiche)}</strong><small>prix à mettre sur Vinted</small></div></div>
-                  <div className="roi-track"><div><span>RENDEMENT CIBLE SUR COÛT</span><b>{result.prix_revente < result.prix_min_x2 ? "⚠️ sous x2" : "×2 net minimum"}</b></div><div className="roi-bar"><span style={{ width: `${Math.min(100, (result.prix_revente / Math.max(result.prix_min_x2, 1)) * 100)}%` }} /></div></div>
-                  {result.prix_revente < result.prix_min_x2 && <div className="alert-warning"><ShieldAlert className="size-4 shrink-0" />Le prix réel conseillé est inférieur au seuil x2. Tu peux le valider si le marché le justifie, mais il faudra le surveiller.</div>}
-                  <div className="schedule-line"><span className="metric-icon blue"><ShieldCheck className="size-4" /></span><div><small>PROCHAIN CRÉNEAU OPSEC</small><strong>{result.creneau_publi}</strong></div><span className="sku-tag">{result.sku_id}</span></div>
-                  <div className="authenticity-note"><BadgeCheck className="size-4" /><div><b>Contrôle visuel : {result.authenticite.niveau}</b><span>Une analyse photo ne certifie pas l&apos;authenticité. Vérification physique recommandée.</span></div></div>
+                  <div className="result-topline"><span className="step-label">02 / ARBITRAGE & MARCHÉ</span><span className={statusClass(result.statut)}><i />{STATUS_LABELS[result.statut]}</span></div>
+                  <div className="result-product">
+                    <div>
+                      <span className="product-brand">{result.marque}</span>
+                      <h2>{result.modele}</h2>
+                      <p>{result.categorie} <span>·</span> Taille {result.taille} <span>·</span> {result.etat}</p>
+                    </div>
+                    <div className="display-price">
+                      <small>PRIX RAPIDE CIBLE</small>
+                      <strong>{euro(result.market_verdict?.prix_vente_rapide ?? result.prix_revente ?? result.prix_affiche)}</strong>
+                      <span>{result.market_verdict?.verdict_label || (result.prix_revente < result.prix_min_x2 ? "⚠️ sous seuil x2" : "Marge saine")}</span>
+                    </div>
+                  </div>
+
+                  {/* Real Market Reality & Sourcing Verdict Card */}
+                  {result.market_verdict && (
+                    <div className={`market-verdict-card verdict-status-${result.market_verdict.verdict === "EXCELLENT_SOURCING" ? "excellent" : result.market_verdict.verdict === "ACHAT_CORRECT" ? "correct" : "trop_cher"}`}>
+                      <div className="verdict-header">
+                        <div className="flex items-center gap-2">
+                          <span className={`verdict-badge ${result.market_verdict.verdict === "EXCELLENT_SOURCING" ? "badge-excellent" : result.market_verdict.verdict === "ACHAT_CORRECT" ? "badge-correct" : "badge-trop_cher"}`}>
+                            {result.market_verdict.verdict === "EXCELLENT_SOURCING" ? <Flame className="size-3.5 fill-current" /> : result.market_verdict.verdict === "ACHAT_CORRECT" ? <CheckCircle2 className="size-3.5" /> : <ShieldAlert className="size-3.5" />}
+                            {result.market_verdict.verdict_label}
+                          </span>
+                          <strong className="text-xs text-white">{result.market_verdict.velocite_label}</strong>
+                        </div>
+                        <div className="text-[10px] text-zinc-400 font-mono">
+                          Médian marché : <b className="text-white">{euro(result.market_verdict.prix_marche_moyen)}</b>
+                        </div>
+                      </div>
+                      
+                      <p className="verdict-explanation">{result.market_verdict.analyse}</p>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[8px] tracking-wider text-zinc-400 uppercase font-mono font-semibold">Grille Stratégique des 4 Prix</span>
+                          <span className="text-[8px] text-zinc-500">Cliquez pour copier</span>
+                        </div>
+                        <div className="strategic-prices-grid">
+                          <button
+                            type="button"
+                            onClick={() => copyText(String(result.market_verdict!.prix_vente_rapide), "prix_rapide")}
+                            className="strategic-price-box"
+                            title="Prix parfait pour vendre en moins de 7 jours"
+                          >
+                            <span className="price-title text-emerald-400">⚡ Vente Rapide</span>
+                            <strong className="text-emerald-400">{euro(result.market_verdict.prix_vente_rapide)}</strong>
+                            <small>&lt; 7 jours · Liquidité max</small>
+                            <span className="price-copy-hint">{copied === "prix_rapide" ? <Check className="size-2.5 text-emerald-400" /> : <Copy className="size-2.5" />}{copied === "prix_rapide" ? "Copié !" : "Copier"}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => copyText(String(result.market_verdict!.prix_affiche_recommande), "prix_affiche")}
+                            className="strategic-price-box highlight"
+                            title="Prix à afficher sur Vinted avec marge de négociation"
+                          >
+                            <span className="price-title text-emerald-300">🎯 Prix Affiché</span>
+                            <strong>{euro(result.market_verdict.prix_affiche_recommande)}</strong>
+                            <small>+18% marge de négociation</small>
+                            <span className="price-copy-hint">{copied === "prix_affiche" ? <Check className="size-2.5 text-emerald-400" /> : <Copy className="size-2.5" />}{copied === "prix_affiche" ? "Copié !" : "Copier"}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => copyText(String(result.market_verdict!.contre_offre), "prix_contre_offre")}
+                            className="strategic-price-box"
+                            title="Contre-offre idéale à envoyer en message"
+                          >
+                            <span className="price-title text-blue-400">🤝 Contre-Offre</span>
+                            <strong className="text-blue-300">{euro(result.market_verdict.contre_offre)}</strong>
+                            <small>À proposer aux acheteurs</small>
+                            <span className="price-copy-hint">{copied === "prix_contre_offre" ? <Check className="size-2.5 text-emerald-400" /> : <Copy className="size-2.5" />}{copied === "prix_contre_offre" ? "Copié !" : "Copier"}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => copyText(String(result.market_verdict!.prix_plancher), "prix_plancher")}
+                            className="strategic-price-box"
+                            title="Ne pas descendre en dessous"
+                          >
+                            <span className="price-title text-amber-400">🛑 Prix Plancher</span>
+                            <strong className="text-amber-300">{euro(result.market_verdict.prix_plancher)}</strong>
+                            <small>Seuil de sécurité strict</small>
+                            <span className="price-copy-hint">{copied === "prix_plancher" ? <Check className="size-2.5 text-emerald-400" /> : <Copy className="size-2.5" />}{copied === "prix_plancher" ? "Copié !" : "Copier"}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Financial Grid */}
+                  <div className="financial-grid">
+                    <div>
+                      <span>Coût d&apos;acquisition (CTA)</span>
+                      <strong>{euro(result.cta_ttc)}</strong>
+                      <small>dont port & emballage</small>
+                    </div>
+                    <div>
+                      <span>Seuil théorique x2</span>
+                      <strong className="green-text">{euro(result.prix_min_x2)}</strong>
+                      <small>2x coût total</small>
+                    </div>
+                    <div>
+                      <span>Marge nette estimée</span>
+                      <strong className={result.market_verdict?.verdict === "ACHAT_TROP_CHER" ? "text-amber-300" : "blue-text"}>
+                        {euro(result.market_verdict ? result.market_verdict.prix_vente_rapide - result.cta_ttc : result.prix_revente - result.cta_ttc)}
+                      </strong>
+                      <small>
+                        {result.market_verdict
+                          ? `ROI réel ~${Math.round(((result.market_verdict.prix_vente_rapide - result.cta_ttc) / Math.max(1, result.cta_ttc)) * 100)}%`
+                          : "hors frais de port"}
+                      </small>
+                    </div>
+                  </div>
+
+                  {/* Defects & Anti-Dispute Box */}
+                  {((result.defauts_observes && result.defauts_observes.length > 0) || result.defauts_transparence) && (
+                    <div className="defects-box">
+                      <div className="defects-box-heading">
+                        <span className="flex items-center gap-1.5">
+                          <ShieldAlert className="size-3.5" />
+                          DÉFAUTS & USURE DÉTECTÉS (ANTI-LITIGE VINTED)
+                        </span>
+                        {result.defauts_transparence && (
+                          <CopyButton
+                            text={result.defauts_transparence}
+                            field="defauts_clause"
+                            copied={copied}
+                            onCopy={copyText}
+                            label="Copier clause"
+                          />
+                        )}
+                      </div>
+
+                      {result.defauts_observes && result.defauts_observes.length > 0 ? (
+                        <div className="flex flex-col gap-1.5">
+                          {result.defauts_observes.map((def, idx) => (
+                            <div key={idx} className="defect-item">
+                              <span className="defect-severity severity-visible">
+                                Observé
+                              </span>
+                              <div className="flex-1 flex flex-col gap-0.5">
+                                <span>{def}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-[9px] text-zinc-400">Aucun défaut visible détecté sur les photos fournies.</p>
+                      )}
+
+                      {result.defauts_transparence && (
+                        <div className="transparency-clause">
+                          &ldquo;{result.defauts_transparence}&rdquo;
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="schedule-line">
+                    <span className="metric-icon blue"><ShieldCheck className="size-4" /></span>
+                    <div><small>PROCHAIN CRÉNEAU OPSEC</small><strong>{result.creneau_publi}</strong></div>
+                    <span className="sku-tag">{result.sku_id}</span>
+                  </div>
+
+                  <div className="authenticity-note">
+                    <BadgeCheck className="size-4" />
+                    <div>
+                      <b>Contrôle visuel : {result.authenticite.niveau}</b>
+                      <span>Une analyse photo ne certifie pas l&apos;authenticité. Vérification physique recommandée.</span>
+                    </div>
+                  </div>
+
                   <ChecklistFields checklist={result.checklist || emptyChecklist()} onChange={(key, checked) => updateChecklistItem(result.sku_id, key, checked)} />
-                  {(result.caracteristiques.length > 0 || result.mesures) && <div className="item-facts"><span>OBSERVATIONS IA</span><p>{result.caracteristiques.join(" · ")}{result.mesures && ` · Mesures : ${Object.entries(result.mesures).map(([key, value]) => `${key} ${value}`).join(", ")}`}</p></div>}
+
+                  {(result.caracteristiques.length > 0 || result.mesures) && (
+                    <div className="item-facts">
+                      <span>OBSERVATIONS IA</span>
+                      <p>{result.caracteristiques.join(" · ")}{result.mesures && ` · Mesures : ${Object.entries(result.mesures).map(([key, value]) => `${key} ${value}`).join(", ")}`}</p>
+                    </div>
+                  )}
+
                   <div className="market-snapshot">
-                    <div className="checklist-heading"><span>COMPARABLES VINTED</span><strong>{result.market?.source === "vinted-live" ? `${result.market.count} annonces` : "Indisponible"}</strong></div>
-                    {result.market?.source === "vinted-live" && result.market.count > 0 ? <p>{euro(result.market.min || 0)} – {euro(result.market.max || 0)} <span>· moyenne {euro(result.market.average || 0)}</span></p> : <p>Aucun prix comparable récupéré pour cette recherche.</p>}
-                    {result.market?.observed_at && <small>Relevé le {new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "short" }).format(new Date(result.market.observed_at))}</small>}
+                    <div className="checklist-heading">
+                      <span>COMPARABLES VINTED</span>
+                      <strong>{result.market?.source === "vinted-live" ? `${result.market.count} annonces` : "Indisponible"}</strong>
+                    </div>
+                    {result.market?.source === "vinted-live" && result.market.count > 0 ? (
+                      <p>{euro(result.market.min || 0)} – {euro(result.market.max || 0)} <span>· moyenne {euro(result.market.average || 0)}</span></p>
+                    ) : (
+                      <p>Aucun prix comparable récupéré pour cette recherche.</p>
+                    )}
+                    {result.market?.observed_at && (
+                      <small>Relevé le {new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "short" }).format(new Date(result.market.observed_at))}</small>
+                    )}
                   </div>
                 </div>
+
                 <div className="panel copy-panel">
-                  <div className="panel-heading"><div><span className="step-label">03 / CONTENU</span><h2>{isChecklistComplete(result.checklist) ? "Annonce prête à publier" : "Annonce à vérifier"}</h2></div><span className="ai-badge"><Sparkles className="size-3" /> CLAUDE</span></div>
-                  {mode === "SEMAINE_ACHAT" && result.message_nego && <div className="copy-block"><div className="copy-block-heading"><span>MESSAGE DE NÉGOCIATION</span><CopyButton text={result.message_nego} field="nego" copied={copied} onCopy={copyText} /></div><p>{result.message_nego}</p></div>}
-                  <div className="copy-block"><div className="copy-block-heading"><span><Tag className="size-3.5" /> TITRE SEO</span><CopyButton text={result.titre_seo} field="title" copied={copied} onCopy={copyText} /></div><p className="listing-title">{result.titre_seo}</p></div>
-                  <div className="copy-block"><div className="copy-block-heading"><span>DESCRIPTION & HASHTAGS</span><CopyButton text={`${result.description}\n\n${result.hashtags}`} field="description" copied={copied} onCopy={copyText} label="Tout copier" /></div><p className="listing-description">{result.description}<br /><br /><span>{result.hashtags}</span></p></div>
-                  <div className="result-footer"><span><CheckCircle2 className="size-3.5" /> SKU ajouté à l&apos;historique local</span><button onClick={() => { setView("stock"); setFilter("TOUT"); }} className="text-link">Voir le stock <ArrowRight className="size-3.5" /></button></div>
+                  <div className="panel-heading">
+                    <div>
+                      <span className="step-label">03 / CONTENU OPTIMISÉ</span>
+                      <h2>{isChecklistComplete(result.checklist) ? "Annonce prête à publier" : "Annonce à vérifier"}</h2>
+                    </div>
+                    <span className="ai-badge"><Sparkles className="size-3" /> IA VINTED</span>
+                  </div>
+
+                  {mode === "SEMAINE_ACHAT" && result.message_nego && (
+                    <div className="copy-block">
+                      <div className="copy-block-heading">
+                        <span>MESSAGE DE NÉGOCIATION</span>
+                        <CopyButton text={result.message_nego} field="nego" copied={copied} onCopy={copyText} />
+                      </div>
+                      <p>{result.message_nego}</p>
+                    </div>
+                  )}
+
+                  {/* Title block with Short vs SEO Algorithmic selector */}
+                  <div className="copy-block">
+                    <div className="copy-block-heading">
+                      <div className="flex items-center gap-1.5">
+                        <Tag className="size-3.5" />
+                        <span>TITRE</span>
+                      </div>
+                      <div className="title-choice-tabs">
+                        <button
+                          type="button"
+                          className={`title-choice-btn ${titleTab === "court" ? "active" : ""}`}
+                          onClick={() => setTitleTab("court")}
+                        >
+                          Court & Direct
+                        </button>
+                        <button
+                          type="button"
+                          className={`title-choice-btn ${titleTab === "seo" ? "active" : ""}`}
+                          onClick={() => setTitleTab("seo")}
+                        >
+                          SEO Algorithmique
+                        </button>
+                      </div>
+                      <CopyButton
+                        text={titleTab === "court" ? (result.titre_court || result.titre_seo) : result.titre_seo}
+                        field="title"
+                        copied={copied}
+                        onCopy={copyText}
+                      />
+                    </div>
+                    <p className="listing-title">
+                      {titleTab === "court" ? (result.titre_court || result.titre_seo) : result.titre_seo}
+                    </p>
+                  </div>
+
+                  {/* Description & Hashtags with Interactive pills */}
+                  <div className="copy-block">
+                    <div className="copy-block-heading">
+                      <span>DESCRIPTION & HASHTAGS</span>
+                      <CopyButton
+                        text={`${result.description}\n\n${result.hashtags}`}
+                        field="description"
+                        copied={copied}
+                        onCopy={copyText}
+                        label="Tout copier"
+                      />
+                    </div>
+                    <p className="listing-description">
+                      {result.description}
+                      <br /><br />
+                      <span>{result.hashtags}</span>
+                    </p>
+                    {result.hashtags && (
+                      <div className="hashtags-cloud">
+                        {result.hashtags.split(/\s+/).filter((tag) => tag.startsWith("#")).map((tag, i) => (
+                          <span
+                            key={i}
+                            className="hashtag-pill"
+                            onClick={() => copyText(tag, `tag_${i}`)}
+                            title="Cliquer pour copier ce hashtag"
+                          >
+                            {copied === `tag_${i}` ? "✓ " : ""}{tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="result-footer">
+                    <span><CheckCircle2 className="size-3.5" /> SKU ajouté à l&apos;historique local</span>
+                    <button onClick={() => { setView("stock"); setFilter("TOUT"); }} className="text-link">
+                      Voir le stock <ArrowRight className="size-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Mobile Sticky Quick Bar */}
+                <div className="mobile-sticky-bar">
+                  <button
+                    type="button"
+                    className="sticky-btn"
+                    onClick={() => copyText(titleTab === "court" ? (result.titre_court || result.titre_seo) : result.titre_seo, "sticky_titre")}
+                  >
+                    {copied === "sticky_titre" ? <Check className="size-3.5 text-emerald-400" /> : <Tag className="size-3.5" />}
+                    <span>{copied === "sticky_titre" ? "Titre copié !" : "Titre"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="sticky-btn"
+                    onClick={() => copyText(String(result.market_verdict?.prix_affiche_recommande ?? result.prix_revente ?? result.prix_affiche), "sticky_prix")}
+                  >
+                    {copied === "sticky_prix" ? <Check className="size-3.5 text-emerald-400" /> : <Wallet className="size-3.5" />}
+                    <span>{copied === "sticky_prix" ? "Prix copié !" : `Prix (${euro(result.market_verdict?.prix_affiche_recommande ?? result.prix_revente ?? result.prix_affiche)})`}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="sticky-btn"
+                    onClick={() => copyText(`${result.description}\n\n${result.hashtags}`, "sticky_desc")}
+                  >
+                    {copied === "sticky_desc" ? <Check className="size-3.5 text-emerald-400" /> : <Clipboard className="size-3.5" />}
+                    <span>{copied === "sticky_desc" ? "Desc copiée !" : "Description"}</span>
+                  </button>
+                  <a
+                    href="https://www.vinted.fr/items/new"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="sticky-btn sticky-btn-vinted"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    <span>Ouvrir Vinted</span>
+                  </a>
                 </div>
               </> : <div className="empty-analysis"><div className="empty-graphic"><span><ImagePlus className="size-6" /></span><i /><i /><i /></div><span className="step-label">EN ATTENTE D&apos;INGESTION</span><h2>Votre prochain achat commence ici.</h2><p>Ajoutez trois angles, lancez l&apos;analyse. L&apos;identification, le calcul du seuil et la rédaction se font en une seule passe.</p><div className="empty-flow"><span>VISION IA</span><ArrowRight className="size-3" /><span>ARBITRAGE ROI</span><ArrowRight className="size-3" /><span>ANNONCE</span></div></div>}
             </div>
