@@ -171,6 +171,20 @@ function euro(value: number) {
   return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(value || 0);
 }
 
+function getVintedDressingUrl(input: string): string {
+  const trimmed = (input || "").trim();
+  if (!trimmed) return "https://www.vinted.fr/closet";
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    return trimmed;
+  }
+  // Sur Vinted, les profils membres exigent l'ID numérique (ex: 142981723-durandflorian88)
+  if (/^\d+/.test(trimmed)) {
+    return `https://www.vinted.fr/member/${trimmed}?tab=closet`;
+  }
+  // Raccourci officiel Vinted : redirige automatiquement vers le dressing du compte connecté
+  return "https://www.vinted.fr/closet";
+}
+
 function daysSince(date: string | undefined, referenceTime: number) {
   if (!date || !referenceTime) return 0;
   const days = Math.floor((referenceTime - new Date(date).getTime()) / 86_400_000);
@@ -526,7 +540,18 @@ export default function VintedDashboard() {
   const [filter, setFilter] = useState<Status | "TOUT">("TOUT");
   const [query, setQuery] = useState("");
   const [syncState, setSyncState] = useState("Synchronisation en attente");
-  const [vintedUsername, setVintedUsername] = useState("durandflorian88");
+  const [vintedUsername, setVintedUsername] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("vinted_profile_url_or_id") || "durandflorian88";
+    }
+    return "durandflorian88";
+  });
+  const handleVintedUsernameChange = (val: string) => {
+    setVintedUsername(val);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("vinted_profile_url_or_id", val);
+    }
+  };
   const [vintedLiveTab, setVintedLiveTab] = useState<"sales" | "online" | "import">("sales");
   const [vintedImportText, setVintedImportText] = useState("");
   const [shippingLabels, setShippingLabels] = useState<ShippingLabel[]>([]);
@@ -2824,7 +2849,7 @@ export default function VintedDashboard() {
                 </div>
                 <div className="heading-actions">
                   <a
-                    href={`https://www.vinted.fr/member/${vintedUsername.replace("@", "")}?tab=closet`}
+                    href={getVintedDressingUrl(vintedUsername)}
                     target="_blank"
                     rel="noreferrer"
                     className="secondary-button"
@@ -2841,12 +2866,20 @@ export default function VintedDashboard() {
                   <input
                     type="text"
                     value={vintedUsername}
-                    onChange={(e) => setVintedUsername(e.target.value)}
-                    placeholder="Votre pseudo ou ID Vinted (ex: durandflorian88)"
-                    title="Pseudo Vinted pour les accès directs"
+                    onChange={(e) => handleVintedUsernameChange(e.target.value)}
+                    placeholder="URL directe de ton dressing ou ID Vinted (laisser vide = redirection automatique /closet)"
+                    title="URL de votre dressing ou identifiant Vinted"
                   />
                 </div>
                 <div className="vinted-dressing-links">
+                  <a
+                    href="https://www.vinted.fr/my-account/orders"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="secondary-button !h-8 !text-[10px]"
+                  >
+                    📦 Mes Commandes & Ventes
+                  </a>
                   <a
                     href="https://www.vinted.fr/inbox"
                     target="_blank"
