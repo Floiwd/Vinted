@@ -665,6 +665,22 @@ async function callOpenAiCompatible(
   const models = resolveOpenAiCompatibleModels(candidate, task, requestedModel);
   let lastError: Error | null = null;
 
+  let outgoingMessages = messages;
+  if (candidate.id === "groq" && task === "vision") {
+    let imageCount = 0;
+    outgoingMessages = messages.map((msg) => {
+      if (typeof msg.content === "string") return msg;
+      const filteredParts = msg.content.filter((part) => {
+        if (part.type === "image_url") {
+          imageCount++;
+          return imageCount <= 3;
+        }
+        return true;
+      });
+      return { ...msg, content: filteredParts };
+    });
+  }
+
   for (const model of models) {
     let response: Response;
     try {
@@ -682,7 +698,7 @@ async function callOpenAiCompatible(
         },
         body: JSON.stringify({
           model,
-          messages,
+          messages: outgoingMessages,
           temperature: 0.4,
           response_format: { type: "json_object" },
         }),

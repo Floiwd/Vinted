@@ -246,6 +246,92 @@ async function compressPhotoDataUrl(dataUrl: string, maxDimension: number, quali
   });
 }
 
+async function stitchPhotosToCollage(photos: Photo[]): Promise<Photo> {
+  if (photos.length === 1) return photos[0];
+
+  const loaded = await Promise.all(
+    photos.map(async (photo) => {
+      const img = new window.Image();
+      img.src = photo.dataUrl;
+      await img.decode();
+      return { img, angle: photo.angle, name: photo.name };
+    })
+  );
+
+  const count = loaded.length;
+  const cols = count === 2 ? 2 : count <= 4 ? 2 : 3;
+  const rows = Math.ceil(count / cols);
+
+  const tileW = 640;
+  const tileH = 640;
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * tileW;
+  canvas.height = rows * tileH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return photos[0];
+
+  ctx.fillStyle = "#0f172a";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  loaded.forEach(({ img, angle }, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = col * tileW;
+    const y = row * tileH;
+
+    const scale = Math.min((tileW - 8) / img.naturalWidth, (tileH - 44) / img.naturalHeight);
+    const drawW = img.naturalWidth * scale;
+    const drawH = img.naturalHeight * scale;
+    const drawX = x + (tileW - drawW) / 2;
+    const drawY = y + 4 + (tileH - 44 - drawH) / 2;
+
+    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+
+    ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+    ctx.fillRect(x, y + tileH - 36, tileW, 36);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 15px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(angle, x + tileW / 2, y + tileH - 18);
+  });
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (value) => (value ? resolve(value) : reject(new Error("Assemblage photo impossible."))),
+      "image/jpeg",
+      0.78
+    );
+  });
+
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Lecture de l'assemblage impossible."));
+    reader.readAsDataURL(blob);
+  });
+
+  const anglesSummary = photos.map((p) => p.angle).join(" · ");
+  return {
+    dataUrl,
+    angle: `Planche multi-vues (${anglesSummary})`,
+    name: `planche-${photos.length}-vues.jpg`,
+  };
+}
+
+async function preparePhotosForAi(photos: Photo[]): Promise<Photo[]> {
+  if (photos.length <= 3) return photos;
+
+  // Répartit en 2 ou 3 planches composites pour être 100% compatible avec tous les modèles d'IA (ex: Groq max 3 images)
+  const groupCount = photos.length <= 4 ? 2 : 3;
+  const groups: Photo[][] = Array.from({ length: groupCount }, () => []);
+  photos.forEach((photo, i) => {
+    groups[i % groupCount].push(photo);
+  });
+
+  return Promise.all(groups.map((group) => stitchPhotosToCollage(group)));
+}
+
 async function createAnalysisRequestBody(
   photos: Photo[],
   prixAchat: number | null,
@@ -253,6 +339,9 @@ async function createAnalysisRequestBody(
   skuId: string,
   aiConfig?: { provider?: AiProviderType; apiKey?: string; omnirouteBaseUrl?: string }
 ) {
+  // Si plus de 3 photos, fusionne intelligemment en planches pour ne jamais dépasser la limite fournisseur tout en gardant tous les angles
+  const preparedPhotos = await preparePhotosForAi(photos);
+
   const limitBytes = 3_500_000;
   const variants = [
     { maxDimension: 1500, quality: 0.78 },
@@ -264,8 +353,8 @@ async function createAnalysisRequestBody(
 
   for (const variant of variants) {
     const requestPhotos = variant.maxDimension === 1500 && variant.quality === 0.78
-      ? photos
-      : await Promise.all(photos.map(async (photo) => ({
+      ? preparedPhotos
+      : await Promise.all(preparedPhotos.map(async (photo) => ({
         ...photo,
         dataUrl: await compressPhotoDataUrl(photo.dataUrl, variant.maxDimension, variant.quality),
       })));
