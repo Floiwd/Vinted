@@ -3,14 +3,29 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { appendSkuToTitle, ensureManualSizePrompt, normalizeRecognizedSize, sanitizeAdCopy } from "@/lib/ad-copy";
+import {
+  executeAiPrompt,
+  getAiStatusSummary,
+  mergeRuntimeAiConfig,
+  type AiProviderType,
+  type UserAiConfig,
+} from "@/lib/ai-provider";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
-export const maxDuration = 140;
+export const maxDuration = 60;
 
 let skuReservationQueue = Promise.resolve();
 
 type PhotoInput = { dataUrl: string; angle: string };
+type AiConfigInput = {
+  provider?: AiProviderType;
+  apiKey?: string;
+  omnirouteBaseUrl?: string;
+  visionModel?: string;
+  copyModel?: string;
+  clearApiKey?: boolean;
+};
 type PipelineInput = {
   action?: string;
   stock?: unknown[];
@@ -20,6 +35,7 @@ type PipelineInput = {
   photos?: PhotoInput[];
   prixAchat?: number | null;
   mode?: "SEMAINE_ACHAT" | "WEEKEND_SHOOTING";
+  aiConfig?: AiConfigInput;
 };
 
 function dataDirectory(userId: string) {
@@ -28,8 +44,11 @@ function dataDirectory(userId: string) {
 
 async function readServerStock(userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    const { data, error } = await getSupabaseAdmin().from("vinted_stock").select("data")
-      .like("sku_id", `${userId}:%`).eq("data->>owner_id", userId)
+    const { data, error } = await getSupabaseAdmin()
+      .from("vinted_stock")
+      .select("data")
+      .like("sku_id", `${userId}:%`)
+      .eq("data->>owner_id", userId)
       .order("updated_at", { ascending: false });
     if (error) throw new Error(`Lecture Supabase impossible : ${error.message}`);
     return (data || []).map((row) => row.data) as unknown[];
@@ -51,7 +70,11 @@ async function writeServerStock(stock: unknown[], userId: string) {
         throw new Error("SKU de stock invalide.");
       }
       const updatedAt = typeof item.updated_at === "string" ? item.updated_at : now;
-      return { sku_id: `${userId}:${item.sku_id}`, data: { ...item, owner_id: userId, updated_at: updatedAt }, updated_at: updatedAt };
+      return {
+        sku_id: `${userId}:${item.sku_id}`,
+        data: { ...item, owner_id: userId, updated_at: updatedAt },
+        updated_at: updatedAt,
+      };
     });
     if (!rows.length) return;
     const { error } = await getSupabaseAdmin().from("vinted_stock").upsert(rows, { onConflict: "sku_id" });
@@ -98,8 +121,11 @@ async function reserveServerSku(userId: string) {
 
 async function deleteServerStock(skuId: string, userId: string) {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    const { error } = await getSupabaseAdmin().from("vinted_stock").delete()
-      .eq("sku_id", `${userId}:${skuId}`).eq("data->>owner_id", userId);
+    const { error } = await getSupabaseAdmin()
+      .from("vinted_stock")
+      .delete()
+      .eq("sku_id", `${userId}:${skuId}`)
+      .eq("data->>owner_id", userId);
     if (error) throw new Error(`Suppression Supabase impossible : ${error.message}`);
     return;
   }
@@ -111,14 +137,77 @@ function json(data: unknown, status = 200, headers?: HeadersInit) {
   return Response.json(data, { status, headers });
 }
 
-async function authenticateRequest(request: Request): Promise<{ userId?: string; status?: number }> {
+async function readLocalAiConfig(userId: string): Promise<UserAiConfig | null> {
+  try {
+    const raw = await readFile(join(dataDirectory(userId), "ai-config.json"), "utf8");
+    return JSON.parse(raw) as UserAiConfig;
+  } catch {
+    return null;
+  }
+}
+
+async function saveUserAiConfig(
+  userId: string,
+  currentMetadata: Record<string, unknown>,
+  existingConfig: UserAiConfig | null,
+  input: AiConfigInput
+): Promise<UserAiConfig> {
+  const validProviders: AiProviderType[] = ["auto", "gemini", "openrouter", "openai", "groq", "anthropic", "omniroute"];
+  const provider: AiProviderType = validProviders.includes(input.provider as AiProviderType)
+    ? (input.provider as AiProviderType)
+    : existingConfig?.provider || "auto";
+
+  const trimmedNewKey = input.apiKey?.trim() || "";
+  const resolvedApiKey = input.clearApiKey ? "" : trimmedNewKey || existingConfig?.apiKey || "";
+
+  const nextConfig: UserAiConfig = {
+    provider,
+    apiKey: resolvedApiKey,
+    omnirouteBaseUrl: (input.omnirouteBaseUrl ?? existingConfig?.omnirouteBaseUrl ?? "").trim().slice(0, 240),
+    visionModel: (input.visionModel ?? existingConfig?.visionModel ?? "").trim().slice(0, 120),
+    copyModel: (input.copyModel ?? existingConfig?.copyModel ?? "").trim().slice(0, 120),
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    const { error } = await getSupabaseAdmin().auth.admin.updateUserById(userId, {
+      user_metadata: {
+        ...currentMetadata,
+        vinted_ai_config: nextConfig,
+      },
+    });
+    if (error) throw new Error(`Sauvegarde Supabase impossible : ${error.message}`);
+  }
+  try {
+    const directory = dataDirectory(userId);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "ai-config.json"), JSON.stringify(nextConfig, null, 2), "utf8");
+  } catch {
+    // Local directory write fallback
+  }
+  return nextConfig;
+}
+
+async function authenticateRequest(request: Request): Promise<{
+  userId?: string;
+  userMetadata?: Record<string, unknown>;
+  userAiConfig?: UserAiConfig | null;
+  status?: number;
+}> {
   const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
   if (!token) return { status: 401 };
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return { status: 503 };
   try {
     const { data, error } = await getSupabaseAdmin().auth.getUser(token);
     if (error || !data.user) return { status: 401 };
-    return { userId: data.user.id };
+    const metadata = (data.user.user_metadata || {}) as Record<string, unknown>;
+    const metaConfig = metadata.vinted_ai_config as UserAiConfig | undefined;
+    const localConfig = metaConfig ? null : await readLocalAiConfig(data.user.id);
+    return {
+      userId: data.user.id,
+      userMetadata: metadata,
+      userAiConfig: metaConfig || localConfig || null,
+    };
   } catch {
     return { status: 503 };
   }
@@ -151,48 +240,6 @@ function nextPublicationSlot() {
   return "Prochain créneau vendredi soir";
 }
 
-async function omniRoute(model: string, messages: unknown[], options: { timeoutMs?: number; stage: string }) {
-  const apiKey = process.env.OMNIROUTE_API_KEY;
-  if (!apiKey) throw new Error("OMNIROUTE_API_KEY n'est pas configurée côté serveur.");
-  const timeoutMs = options.timeoutMs ?? 45_000;
-  const baseUrl = (process.env.OMNIROUTE_BASE_URL || "http://localhost:4000/v1").replace(/\/$/, "");
-  const endpoint = baseUrl.endsWith("/chat/completions")
-    ? baseUrl
-    : `${baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`}/chat/completions`;
-  let response: Response;
-  try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, temperature: 0.4, response_format: { type: "json_object" } }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    const reason = error instanceof Error && error.name === "TimeoutError"
-      ? `La requête a dépassé ${Math.round(timeoutMs / 1000)} secondes.`
-      : "Vérifie que le serveur OmniRoute est démarré et joignable depuis Next.js.";
-    throw new Error(`OmniRoute n'a pas terminé ${options.stage} (${endpoint}). ${reason}`);
-  }
-  const payload = await response.json().catch(() => null) as {
-    error?: { message?: string };
-    choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
-  } | null;
-  if (!response.ok) {
-    const providerMessage = payload?.error?.message || `OmniRoute a répondu ${response.status}.`;
-    if (/no active credentials/i.test(providerMessage)) {
-      throw new Error(`Aucun accès fournisseur actif dans OmniRoute pour ${model}. Active un compte fournisseur ou choisis un modèle autorisé.`);
-    }
-    if (/exhausted their quota|quota.*exhaust/i.test(providerMessage)) {
-      throw new Error(`Le quota est épuisé pour ${model}. Vérifie les comptes fournisseurs OmniRoute ou choisis un modèle disponible.`);
-    }
-    throw new Error(providerMessage);
-  }
-  const content = payload?.choices?.[0]?.message?.content;
-  const text = Array.isArray(content) ? content.map((part) => part.text || "").join("\n") : content;
-  if (!text) throw new Error("Réponse IA vide.");
-  return text;
-}
-
 async function vintedMarketSnapshot(item: { marque: string; modele: string; categorie: string; taille: string; etat?: string }) {
   const searchTerms = [item.marque, item.modele, item.categorie, item.taille]
     .filter((value) => Boolean(value) && !/^à renseigner/i.test(value))
@@ -207,13 +254,15 @@ async function vintedMarketSnapshot(item: { marque: string; modele: string; cate
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept-Language": "fr-FR,fr;q=0.9",
-        "Accept": "application/json, text/plain, */*",
+        Accept: "application/json, text/plain, */*",
       },
       signal: AbortSignal.timeout(8_000),
     });
 
     if (!response.ok) return fallback;
-    const data = await response.json() as { items?: Array<{ price?: { amount?: number; currency?: string }; title?: string; brand_title?: string; size?: string; is_for_swap?: boolean }> };
+    const data = (await response.json()) as {
+      items?: Array<{ price?: { amount?: number; currency?: string }; title?: string; brand_title?: string; size?: string }>;
+    };
     const prices = (data.items || [])
       .map((entry) => Number(entry?.price?.amount))
       .filter((value) => Number.isFinite(value) && value > 0)
@@ -252,13 +301,23 @@ export async function GET(request: Request) {
   }
   const userId = auth.userId;
   const url = new URL(request.url);
+
   if (url.searchParams.get("resource") === "stock") {
     try {
-      return json({ success: true, stock: await readServerStock(userId) });
+      return json({
+        success: true,
+        stock: await readServerStock(userId),
+        aiStatus: getAiStatusSummary(auth.userAiConfig),
+      });
     } catch {
       return json({ success: false, error: "Lecture du stock central impossible." }, 500);
     }
   }
+
+  if (url.searchParams.get("resource") === "ai-status") {
+    return json({ success: true, aiStatus: getAiStatusSummary(auth.userAiConfig) });
+  }
+
   const receiptSku = url.searchParams.get("receipt");
   if (receiptSku) {
     if (!/^(?:\d{3,6}|VTD-[A-Z0-9]{4,12})$/i.test(receiptSku)) return json({ success: false, error: "Référence invalide." }, 400);
@@ -275,18 +334,25 @@ export async function GET(request: Request) {
         receiptBytes = new Uint8Array(await readFile(join(dataDirectory(userId), "receipts", `${receiptSku}.${extension}`)));
       }
       const receiptBuffer = receiptBytes.buffer.slice(receiptBytes.byteOffset, receiptBytes.byteOffset + receiptBytes.byteLength) as ArrayBuffer;
-      return new Response(receiptBuffer, { headers: { "Content-Type": contentTypes[extension], "Content-Disposition": "inline", "Cache-Control": "private, no-store" } });
+      return new Response(receiptBuffer, {
+        headers: {
+          "Content-Type": contentTypes[extension],
+          "Content-Disposition": "inline",
+          "Cache-Control": "private, no-store",
+        },
+      });
     } catch {
       return json({ success: false, error: "Reçu introuvable." }, 404);
     }
   }
-  return json({ success: true, userId });
+
+  return json({ success: true, userId, aiStatus: getAiStatusSummary(auth.userAiConfig) });
 }
 
 export async function POST(request: Request) {
   let input: PipelineInput;
   try {
-    input = await request.json() as PipelineInput;
+    input = (await request.json()) as PipelineInput;
   } catch {
     return json({ success: false, error: "Requête JSON invalide." }, 400);
   }
@@ -330,6 +396,50 @@ export async function POST(request: Request) {
     }
   }
 
+  if (input.action === "save-ai-config") {
+    try {
+      const updatedConfig = await saveUserAiConfig(
+        userId,
+        auth.userMetadata || {},
+        auth.userAiConfig || null,
+        input.aiConfig || {}
+      );
+      return json({
+        success: true,
+        aiStatus: getAiStatusSummary(updatedConfig),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Erreur de sauvegarde de la configuration IA.";
+      return json({ success: false, error: message }, 500);
+    }
+  }
+
+  if (input.action === "test-ai-config") {
+    try {
+      const effectiveConfig = mergeRuntimeAiConfig(auth.userAiConfig || null, input.aiConfig);
+      const testResult = await executeAiPrompt({
+        task: "copy",
+        defaultModel: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+        messages: [
+          { role: "system", content: "Réponds strictement par l'objet JSON suivant : {\"ok\": true}" },
+          { role: "user", content: "Test de connexion IA Vinted COO." },
+        ],
+        timeoutMs: 18_000,
+        stage: "le test de connexion IA",
+        userConfig: effectiveConfig,
+      });
+      return json({
+        success: true,
+        providerLabel: testResult.providerLabel,
+        providerId: testResult.providerId,
+        aiStatus: getAiStatusSummary(effectiveConfig),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Test de connexion IA échoué.";
+      return json({ success: false, error: message }, 400);
+    }
+  }
+
   if (input.action === "save-receipt") {
     if (!/^(?:\d{3,9}|VTD-[A-Z0-9]{4,12})$/i.test(input.skuId || "")) return json({ success: false, error: "SKU invalide." }, 400);
     const skuId = input.skuId!;
@@ -354,8 +464,8 @@ export async function POST(request: Request) {
   }
 
   const photos = input.photos;
-  if (!Array.isArray(photos) || photos.length < 3 || photos.length > 8) {
-    return json({ success: false, error: "Ajoutez entre 3 et 8 photos, dont une vue globale, une étiquette et des détails." }, 400);
+  if (!Array.isArray(photos) || photos.length < 1 || photos.length > 12) {
+    return json({ success: false, error: "Ajoutez entre 1 et 12 photos de l'article." }, 400);
   }
   const totalBytes = photos.reduce((total, photo) => total + (photo?.dataUrl?.length ?? 0), 0);
   if (totalBytes > 26_000_000 || photos.some((photo) => !/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo.dataUrl))) {
@@ -366,30 +476,49 @@ export async function POST(request: Request) {
   }
 
   try {
-    const visionText = await omniRoute(process.env.GEMINI_MODEL || "gemini/gemini-2.5-flash", [
-      {
-        role: "system",
-        content: "Tu es un assistant d'inventaire textile. Analyse chaque photo sans jamais certifier une authenticité à partir d'images seules. Signale les indices observables et les incertitudes. Pour la taille, lis uniquement une étiquette lisible; ne la déduis jamais de la coupe, du vêtement ou des proportions. Si aucune taille lisible n'apparaît, renvoie exactement 'À renseigner manuellement'. Lis les mesures uniquement si un mètre ruban est visible et ses graduations sont lisibles; sinon renvoie mesures null. Réponds en JSON strict avec marque, modele, categorie, taille, etat, caracteristiques (tableau), mesures (objet de mesures ou null), authenticite (niveau parmi faible/moyen/élevé et indices tableau), prix_achat_cible_eur (nombre), confiance (nombre 0-1). Pour le prix cible, estime un prix de sourcing prudent en euros et distingue-le d'une valeur de revente.",
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: `Analyse l'article sur ces ${photos.length} angles. Les fichiers sont dans l'ordre fourni; les libellés sont indiqués avant chaque photo. ${photos.map((photo) => photo.angle).join("; ")} ${input.prixAchat == null ? "Estime aussi un prix d'achat cible prudent." : `Prix d'achat fourni: ${input.prixAchat} EUR.`}` },
-          ...photos.flatMap((photo) => [
-            { type: "text", text: `Angle: ${photo.angle}` },
-            { type: "image_url", image_url: { url: photo.dataUrl } },
-          ]),
-        ],
-      },
-    ], { timeoutMs: 80_000, stage: "l'analyse des photos" });
+    const runtimeAiConfig = mergeRuntimeAiConfig(auth.userAiConfig || null, input.aiConfig);
+
+    const visionResult = await executeAiPrompt({
+      task: "vision",
+      defaultModel: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+      messages: [
+        {
+          role: "system",
+          content: "Tu es un assistant d'inventaire textile. Analyse chaque photo sans jamais certifier une authenticité à partir d'images seules. Signale les indices observables et les incertitudes. Pour la taille, lis uniquement une étiquette lisible; ne la déduis jamais de la coupe, du vêtement ou des proportions. Si aucune taille lisible n'apparaît, renvoie exactement 'À renseigner manuellement'. Lis les mesures uniquement si un mètre ruban est visible et ses graduations sont lisibles; sinon renvoie mesures null. Réponds en JSON strict avec marque, modele, categorie, taille, etat, caracteristiques (tableau), mesures (objet de mesures ou null), authenticite (niveau parmi faible/moyen/élevé et indices tableau), prix_achat_cible_eur (nombre), confiance (nombre 0-1). Pour le prix cible, estime un prix de sourcing prudent en euros et distingue-le d'une valeur de revente.",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text" as const, text: `Analyse l'article sur ces ${photos.length} angles. Les fichiers sont dans l'ordre fourni; les libellés sont indiqués avant chaque photo. ${photos.map((photo) => photo.angle).join("; ")} ${input.prixAchat == null ? "Estime aussi un prix d'achat cible prudent." : `Prix d'achat fourni: ${input.prixAchat} EUR.`}` },
+            ...photos.flatMap((photo) => [
+              { type: "text" as const, text: `Angle: ${photo.angle}` },
+              { type: "image_url" as const, image_url: { url: photo.dataUrl } },
+            ]),
+          ],
+        },
+      ],
+      timeoutMs: 32_000,
+      stage: "l'analyse des photos",
+      userConfig: runtimeAiConfig,
+    });
+
     const vision = parseJson<{
-      marque?: string; modele?: string; categorie?: string; taille?: string; etat?: string;
-      caracteristiques?: string[]; mesures?: Record<string, string | number> | null;
-      authenticite?: { niveau?: string; indices?: string[] }; prix_achat_cible_eur?: number; confiance?: number;
-    }>(visionText);
+      marque?: string;
+      modele?: string;
+      categorie?: string;
+      taille?: string;
+      etat?: string;
+      caracteristiques?: string[];
+      mesures?: Record<string, string | number> | null;
+      authenticite?: { niveau?: string; indices?: string[] };
+      prix_achat_cible_eur?: number;
+      confiance?: number;
+    }>(visionResult.text);
 
     const purchasePrice = input.prixAchat ?? Number(vision.prix_achat_cible_eur);
-    if (!Number.isFinite(purchasePrice) || purchasePrice < 0) throw new Error("Le prix d'achat cible n'a pas pu être estimé. Saisissez-le manuellement.");
+    if (!Number.isFinite(purchasePrice) || purchasePrice < 0) {
+      throw new Error("Le prix d'achat cible n'a pas pu être estimé. Saisissez-le manuellement.");
+    }
     const ctaTtc = Number((purchasePrice * 1.05 + 0.70 + 3.50).toFixed(2));
     const minimumPrice = Number((ctaTtc * 2).toFixed(2));
     const displayedPrice = Math.ceil(minimumPrice * 1.18);
@@ -405,31 +534,40 @@ export async function POST(request: Request) {
       confiance: Math.min(1, Math.max(0, Number(vision.confiance) || 0)),
     };
     const market = await vintedMarketSnapshot(item);
-    const copyText = await omniRoute(process.env.CLAUDE_MODEL || "auto/claude-sonnet", [
-      {
-        role: "system",
-        content: "Tu es un rédacteur Vinted premium. Tu produis des annonces factuelles, nettes et crédibles qui ressemblent à des ventes réelles de qualité, pas à des textes génériques. Réponds en JSON strict avec les clés titre_seo, description, hashtags, message_nego. Règles absolues : 1) titre_seo doit être court, précis, orienté SEO, avec marque, modèle, taille, coupe et couleur visibles; si la taille vaut 'À renseigner manuellement', écris 'Taille à renseigner' dans le titre et ne la remplace jamais par une taille supposée ; 2) la description doit être une annonce Vinted propre, lisible, en français, avec structure premium : '📝 Brand Model' puis 'Détails:' avec marque, modèle, taille, couleur, puis '✨ État:' avec 1-2 phrases concrètes, puis '💡 Pourquoi l'acheter:' avec un argument de valeur, puis éventuellement '🔎 Keywords:' ; si la taille vaut 'À renseigner manuellement', conserve exactement cette mention dans les détails ; 3) évite les phrases vagues, les superlatifs non vérifiables, les promesses de contournement de modération et les généralisations sans valeur ; 4) si une info manque, dis-le clairement sans l'inventer ; 5) hashtags = 5 à 8 tags très ciblés, réalistes, en français et/ou anglais, sans spam ; 6) message_nego = court, élégant, confiant, sans pression, sans parler d'achat revente, sans mention 'je vends vite', 'promo', 'cash' ou 'je peux baisser' ; 7) utilise le marché observé pour ajuster le prix et le positionnement, sans inventer des ventes non observées. Le titre et la description doivent avoir l'allure d'une vraie annonce Vinted premium, pas un texte de chatgpt minimaliste.",
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          article: item,
-          prixAchat: purchasePrice,
-          prixAffiche: displayedPrice,
-          mode: input.mode || "SEMAINE_ACHAT",
-          market,
-          consignes: {
-            objectif: "Produire un titre SEO premium et une description Vinted très proche du style attendu dans les meilleures annonces",
-            style: "naturel, premium, crédible, lisible, orienté achat",
-            format: "titre_seo, description, hashtags, message_nego",
-            structure_description: ["📝 Titre de l'article", "Détails:", "✨ État:", "💡 Pourquoi l'acheter:", "🔎 Keywords:", "#hashtags"],
-            prohibe: ["invention", "superlatif non vérifiable", "vente flash", "achat revente", "pression", "hashtags spammés"],
-            cible: "titre et description réalistes, de qualité, directement exploitables sur Vinted"
-          }
-        })
-      },
-    ], { timeoutMs: 45_000, stage: "la rédaction de l'annonce" });
-      const rawCopy = parseJson<{ titre_seo?: string; description?: string; hashtags?: string; message_nego?: string }>(copyText);
+
+    const copyResult = await executeAiPrompt({
+      task: "copy",
+      defaultModel: process.env.CLAUDE_MODEL || "auto/claude-sonnet",
+      messages: [
+        {
+          role: "system",
+          content: "Tu es un rédacteur Vinted premium. Tu produis des annonces factuelles, nettes et crédibles qui ressemblent à des ventes réelles de qualité, pas à des textes génériques. Réponds en JSON strict avec les clés titre_seo, description, hashtags, message_nego. Règles absolues : 1) titre_seo doit être court, précis, orienté SEO, avec marque, modèle, taille, coupe et couleur visibles; si la taille vaut 'À renseigner manuellement', écris 'Taille à renseigner' dans le titre et ne la remplace jamais par une taille supposée ; 2) la description doit être une annonce Vinted propre, lisible, en français, avec structure premium : '📝 Brand Model' puis 'Détails:' avec marque, modèle, taille, couleur, puis '✨ État:' avec 1-2 phrases concrètes, puis '💡 Pourquoi l'acheter:' avec un argument de valeur, puis éventuellement '🔎 Keywords:' ; si la taille vaut 'À renseigner manuellement', conserve exactement cette mention dans les détails ; 3) évite les phrases vagues, les superlatifs non vérifiables, les promesses de contournement de modération et les généralisations sans valeur ; 4) si une info manque, dis-le clairement sans l'inventer ; 5) hashtags = 5 à 8 tags très ciblés, réalistes, en français et/ou anglais, sans spam ; 6) message_nego = court, élégant, confiant, sans pression, sans parler d'achat revente, sans mention 'je vends vite', 'promo', 'cash' ou 'je peux baisser' ; 7) utilise le marché observé pour ajuster le prix et le positionnement, sans inventer des ventes non observées. Le titre et la description doivent avoir l'allure d'une vraie annonce Vinted premium, pas un texte de chatgpt minimaliste.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            article: item,
+            prixAchat: purchasePrice,
+            prixAffiche: displayedPrice,
+            mode: input.mode || "SEMAINE_ACHAT",
+            market,
+            consignes: {
+              objectif: "Produire un titre SEO premium et une description Vinted très proche du style attendu dans les meilleures annonces",
+              style: "naturel, premium, crédible, lisible, orienté achat",
+              format: "titre_seo, description, hashtags, message_nego",
+              structure_description: ["📝 Titre de l'article", "Détails:", "✨ État:", "💡 Pourquoi l'acheter:", "🔎 Keywords:", "#hashtags"],
+              prohibe: ["invention", "superlatif non vérifiable", "vente flash", "achat revente", "pression", "hashtags spammés"],
+              cible: "titre et description réalistes, de qualité, directement exploitables sur Vinted",
+            },
+          }),
+        },
+      ],
+      timeoutMs: 24_000,
+      stage: "la rédaction de l'annonce",
+      userConfig: runtimeAiConfig,
+    });
+
+    const rawCopy = parseJson<{ titre_seo?: string; description?: string; hashtags?: string; message_nego?: string }>(copyResult.text);
     const copy = sanitizeAdCopy(rawCopy);
     const skuId = /^\d{3,6}$/.test(input.skuId || "") ? input.skuId! : String(randomInt(1, 1_000_000)).padStart(3, "0");
     const missingSize = item.taille === "À renseigner manuellement";
@@ -461,6 +599,7 @@ export async function POST(request: Request) {
       hashtags: copy.hashtags || "#secondemain #mode #vintage #look #streetwear #style #pull #boutique",
       message_nego: input.mode === "WEEKEND_SHOOTING" ? "" : copy.message_nego || "",
       sync_sheet: false,
+      ai_provider: copyResult.providerLabel || visionResult.providerLabel,
     };
 
     const webhook = process.env.STOCK_PIPELINE;
@@ -477,7 +616,17 @@ export async function POST(request: Request) {
         data.sync_sheet = false;
       }
     }
-    return json({ success: true, data, warning: webhook && !data.sync_sheet ? "Article généré, mais la synchronisation Google Sheets a échoué." : undefined });
+    return json({
+      success: true,
+      data,
+      warning: webhook && !data.sync_sheet ? "Article généré, mais la synchronisation Google Sheets a échoué." : undefined,
+      ai: {
+        visionProvider: visionResult.providerLabel,
+        visionProviderId: visionResult.providerId,
+        copyProvider: copyResult.providerLabel,
+        copyProviderId: copyResult.providerId,
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Erreur inconnue du pipeline.";
     return json({ success: false, error: message }, 502);

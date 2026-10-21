@@ -7,12 +7,56 @@ import type { Html5Qrcode as Html5QrcodeInstance } from "html5-qrcode";
 import { QRCodeSVG } from "qrcode.react";
 import "react-easy-crop/react-easy-crop.css";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import type { AiProviderType, AiStatusSummary } from "@/lib/ai-provider";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ArrowDownToLine, ArrowRight, BadgeCheck, Barcode, Box, CalendarDays, Check, CheckCircle2, Clipboard, Clock3,
-  Copy, FileText, ImagePlus, LockKeyhole, LogOut, Mail, MapPin, PackageCheck, Plus, Printer, RefreshCw,
-  ScanLine, Search, ShieldAlert, ShieldCheck, Sparkles, Tag, TrendingUp, Upload, Wallet, X, Zap,
+  Copy, ExternalLink, FileText, ImagePlus, LockKeyhole, LogOut, Mail, MailCheck, MapPin,
+  PackageCheck, Plus, Printer, RefreshCw, ScanLine, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Tag,
+  TrendingUp, Upload, Wallet, X, Zap,
 } from "lucide-react";
+
+const AI_PROVIDERS: Record<AiProviderType, { label: string; desc: string; keyUrl?: string; placeholder?: string }> = {
+  auto: {
+    label: "Automatique (Cloud ou Serveur)",
+    desc: "Utilise en priorité les clés configurées sur le serveur (GEMINI_API_KEY, OPENROUTER_API_KEY, etc.) ou votre clé de compte.",
+  },
+  gemini: {
+    label: "Google Gemini Cloud (Gratuit / Recommandé)",
+    desc: "Vision native ultra-rapide (Gemini 2.0 Flash). Clé gratuite disponible en 1 clic sur Google AI Studio.",
+    keyUrl: "https://aistudio.google.com/apikey",
+    placeholder: "AIzaSyC_xxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  openrouter: {
+    label: "OpenRouter Cloud",
+    desc: "Agrégateur multi-modèles (Gemini, Claude 3.5 Sonnet, GPT-4o-mini).",
+    keyUrl: "https://openrouter.ai/keys",
+    placeholder: "sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  openai: {
+    label: "OpenAI Cloud (GPT-4o / GPT-4o-mini)",
+    desc: "Modèles GPT officiels avec support vision.",
+    keyUrl: "https://platform.openai.com/api-keys",
+    placeholder: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  groq: {
+    label: "Groq Cloud (Llama Vision)",
+    desc: "Inférence Llama ultra-rapide pour la vision et le texte.",
+    keyUrl: "https://console.groq.com/keys",
+    placeholder: "gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  anthropic: {
+    label: "Anthropic Claude Cloud",
+    desc: "Claude 3.5 Sonnet pour la rédaction haut de gamme.",
+    keyUrl: "https://console.anthropic.com/settings/keys",
+    placeholder: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  omniroute: {
+    label: "OmniRoute (Proxy / Serveur perso)",
+    desc: "Pour connecter votre propre instance OmniRoute (locale ou distante via URL publique).",
+    placeholder: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+};
 
 type Mode = "SEMAINE_ACHAT" | "WEEKEND_SHOOTING";
 type Status = "EN_TRANSIT" | "A_COMPLETER" | "PRET_A_PUBLIER" | "EN_LIGNE" | "VENDU";
@@ -71,7 +115,20 @@ const CHECKLIST_ITEMS: Array<{ key: keyof Checklist; label: string }> = [
   { key: "photos", label: "Photos nettes et complètes" },
   { key: "authenticity", label: "Authenticité contrôlée physiquement" },
 ];
-const PHOTO_ANGLES = ["Vue globale", "Étiquette / marque", "Coutures / détails"];
+const PHOTO_ANGLES = [
+  "Vue globale (face)",
+  "Vue arrière (dos)",
+  "Étiquette col / marque",
+  "Étiquette taille / compo",
+  "Détail matière / texture",
+  "Coutures / finitions",
+  "Défauts éventuels",
+  "Boutons / zip",
+  "Mesures / mètre",
+  "Vue portée / cintre",
+  "Doublure / intérieur",
+  "Vue supplémentaire",
+];
 
 function euro(value: number) {
   return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(value || 0);
@@ -125,7 +182,7 @@ function statusClass(status: Status) {
   return "status status-ready";
 }
 
-function computeResalePrice(prixAchat: number, prixAffiche: number, prixMinX2: number) {
+function _computeResalePrice(prixAchat: number, prixAffiche: number, prixMinX2: number) {
   const realisticPrice = Number(Math.max(prixAffiche, prixAchat * 1.8 + 8).toFixed(2));
   const belowX2 = realisticPrice < prixMinX2;
   return {
@@ -189,16 +246,24 @@ async function compressPhotoDataUrl(dataUrl: string, maxDimension: number, quali
   });
 }
 
-async function createAnalysisRequestBody(photos: Photo[], prixAchat: number | null, mode: Mode, skuId: string) {
+async function createAnalysisRequestBody(
+  photos: Photo[],
+  prixAchat: number | null,
+  mode: Mode,
+  skuId: string,
+  aiConfig?: { provider?: AiProviderType; apiKey?: string; omnirouteBaseUrl?: string }
+) {
   const limitBytes = 3_500_000;
   const variants = [
     { maxDimension: 1500, quality: 0.78 },
-    { maxDimension: 1200, quality: 0.62 },
-    { maxDimension: 900, quality: 0.48 },
+    { maxDimension: 1200, quality: 0.65 },
+    { maxDimension: 900, quality: 0.50 },
+    { maxDimension: 720, quality: 0.40 },
+    { maxDimension: 600, quality: 0.32 },
   ];
 
   for (const variant of variants) {
-    const requestPhotos = variant.maxDimension === 1500
+    const requestPhotos = variant.maxDimension === 1500 && variant.quality === 0.78
       ? photos
       : await Promise.all(photos.map(async (photo) => ({
         ...photo,
@@ -209,6 +274,7 @@ async function createAnalysisRequestBody(photos: Photo[], prixAchat: number | nu
       prixAchat,
       mode,
       skuId,
+      ...(aiConfig ? { aiConfig } : {}),
     });
     if (new Blob([body]).size <= limitBytes) return body;
   }
@@ -217,7 +283,7 @@ async function createAnalysisRequestBody(photos: Photo[], prixAchat: number | nu
 }
 
 function CopyButton({ text, field, copied, onCopy, label = "Copier" }: {
-  text: string; field: string; copied: string | null; onCopy: (text: string, field: string) => void; label?: string;
+  text: string; field: string; copied: string | null; onCopy: (_text: string, _field: string) => void; label?: string;
 }) {
   const isCopied = copied === field;
   return (
@@ -230,7 +296,7 @@ function CopyButton({ text, field, copied, onCopy, label = "Copier" }: {
 
 function ChecklistFields({ checklist, onChange }: {
   checklist: Checklist;
-  onChange: (key: keyof Checklist, checked: boolean) => void;
+  onChange: (_key: keyof Checklist, _checked: boolean) => void;
 }) {
   const completed = CHECKLIST_ITEMS.filter(({ key }) => checklist[key]).length;
   return (
@@ -245,7 +311,7 @@ function ChecklistFields({ checklist, onChange }: {
   );
 }
 
-function QrScanner({ onScan }: { onScan: (value: string) => void }) {
+function QrScanner({ onScan }: { onScan: (_value: string) => void }) {
   const [scanError, setScanError] = useState("");
 
   useEffect(() => {
@@ -277,7 +343,7 @@ export default function VintedDashboard() {
   const [authReady, setAuthReady] = useState(false);
   const [referenceTime, setReferenceTime] = useState(0);
   const [unlocked, setUnlocked] = useState(false);
-  const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
+  const [authMode, setAuthMode] = useState<"sign-in" | "sign-up" | "verify-email">("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [signedInEmail, setSignedInEmail] = useState("");
@@ -285,6 +351,25 @@ export default function VintedDashboard() {
   const [authError, setAuthError] = useState("");
   const [authMessage, setAuthMessage] = useState("");
   const [authPending, setAuthPending] = useState(false);
+  const [verificationEmail, setVerificationEmail] = useState("");
+  const [showResendButton, setShowResendButton] = useState(false);
+  const [resendPending, setResendPending] = useState(false);
+  const [resendNotice, setResendNotice] = useState("");
+  const [resendError, setResendError] = useState("");
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  // AI Modal & config state
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiStatusSummary | null>(null);
+  const [aiProvider, setAiProvider] = useState<AiProviderType>("auto");
+  const [aiApiKey, setAiApiKey] = useState("");
+  const [aiOmnirouteUrl, setAiOmnirouteUrl] = useState("");
+  const [aiVisionModel, setAiVisionModel] = useState("");
+  const [aiCopyModel, setAiCopyModel] = useState("");
+  const [aiPending, setAiPending] = useState(false);
+  const [aiTestResult, setAiTestResult] = useState<{ status: "idle" | "testing" | "success" | "error"; message: string }>({ status: "idle", message: "" });
+  const [aiFeedback, setAiFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [prixAchat, setPrixAchat] = useState("");
   const [mode, setMode] = useState<Mode>("SEMAINE_ACHAT");
@@ -329,6 +414,61 @@ export default function VintedDashboard() {
     return fetch(input, { ...init, headers });
   }
 
+  function applyAiStatus(status: AiStatusSummary | undefined) {
+    if (!status) return;
+    setAiStatus(status);
+    setAiProvider(status.savedConfig.provider || "auto");
+    setAiOmnirouteUrl(status.savedConfig.omnirouteBaseUrl || "");
+    setAiVisionModel(status.savedConfig.visionModel || "");
+    setAiCopyModel(status.savedConfig.copyModel || "");
+  }
+
+  function persist(next: Listing[]) {
+    const now = new Date().toISOString();
+    const normalized = next.map((entry) => ({ ...entry, updated_at: entry.updated_at || entry.created_at || now }));
+    setHistory(normalized);
+    if (userId) localStorage.setItem(localHistoryKey(userId), JSON.stringify(normalized));
+    if (!unlocked || !userId) return;
+    syncQueue.current = syncQueue.current.catch(() => undefined).then(async () => {
+      const response = await apiFetch("/api/vinted-pipeline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync-stock", stock: normalized }),
+      });
+      if (!response.ok) throw new Error("Synchronisation impossible");
+      setSyncState("Synchronisé sur le serveur");
+    }).catch(() => setSyncState("Copie locale uniquement · serveur indisponible"));
+  }
+
+  async function synchronizeFromServer(localStock: Listing[], ownerId: string) {
+    try {
+      const response = await apiFetch("/api/vinted-pipeline?resource=stock");
+      if (!response.ok) throw new Error("Lecture serveur impossible");
+      const payload = await response.json() as { stock: Listing[]; aiStatus?: AiStatusSummary };
+      if (payload.aiStatus) applyAiStatus(payload.aiStatus);
+      const merged = mergeStock(Array.isArray(payload.stock) ? payload.stock : [], localStock);
+      setHistory(merged);
+      localStorage.setItem(localHistoryKey(ownerId), JSON.stringify(merged));
+      const saveResponse = await apiFetch("/api/vinted-pipeline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync-stock", stock: merged }),
+      });
+      if (!saveResponse.ok) throw new Error("Écriture serveur impossible");
+      setSyncState("Synchronisé sur le serveur");
+    } catch {
+      setSyncState("Copie locale uniquement · serveur indisponible");
+    }
+  }
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendCooldown]);
+
   useEffect(() => {
     let active = true;
     let unsubscribe: () => void = () => {};
@@ -337,11 +477,18 @@ export default function VintedDashboard() {
       try {
         const client = getSupabaseBrowserClient();
         supabaseRef.current = client;
-        const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+        const { data: { subscription } } = client.auth.onAuthStateChange(async (_event, session) => {
           setUnlocked(Boolean(session));
           setUserId(session?.user.id || "");
           setSignedInEmail(session?.user.email || "");
-          if (!session) setHistory([]);
+          if (session) {
+            const stored = readLocalHistory(session.user.id);
+            setHistory(stored);
+            await synchronizeFromServer(stored, session.user.id);
+          } else {
+            setHistory([]);
+            setAiStatus(null);
+          }
         });
         unsubscribe = () => subscription.unsubscribe();
 
@@ -380,12 +527,8 @@ export default function VintedDashboard() {
   }, []);
 
   useEffect(() => {
-    if (!loading) {
-      setProgress(0);
-      return;
-    }
+    if (!loading) return;
 
-    setProgress(8);
     const start = Date.now();
     const targetDuration = 30_000;
     let frameId = 0;
@@ -402,8 +545,6 @@ export default function VintedDashboard() {
     };
 
     frameId = window.setInterval(tick, 900);
-    tick();
-
     return () => window.clearInterval(frameId);
   }, [loading]);
 
@@ -447,40 +588,110 @@ export default function VintedDashboard() {
     return groups;
   }, {})).sort((left, right) => right.profit - left.profit);
 
-  function persist(next: Listing[]) {
-    const now = new Date().toISOString();
-    const normalized = next.map((entry) => ({ ...entry, updated_at: entry.updated_at || entry.created_at || now }));
-    setHistory(normalized);
-    if (userId) localStorage.setItem(localHistoryKey(userId), JSON.stringify(normalized));
-    if (!unlocked || !userId) return;
-    syncQueue.current = syncQueue.current.catch(() => undefined).then(async () => {
+  async function saveAiConfiguration(clearKey = false) {
+    setAiPending(true);
+    setAiFeedback(null);
+    try {
       const response = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "sync-stock", stock: normalized }),
+        body: JSON.stringify({
+          action: "save-ai-config",
+          aiConfig: {
+            provider: aiProvider,
+            apiKey: clearKey ? "" : aiApiKey.trim(),
+            omnirouteBaseUrl: aiOmnirouteUrl.trim(),
+            visionModel: aiVisionModel.trim(),
+            copyModel: aiCopyModel.trim(),
+            clearApiKey: clearKey,
+          },
+        }),
       });
-      if (!response.ok) throw new Error("Synchronisation impossible");
-      setSyncState("Synchronisé sur le serveur");
-    }).catch(() => setSyncState("Copie locale uniquement · serveur indisponible"));
+      const payload = (await response.json()) as { success: boolean; aiStatus?: AiStatusSummary; error?: string };
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || "Impossible d'enregistrer la configuration IA.");
+      }
+      if (payload.aiStatus) applyAiStatus(payload.aiStatus);
+      if (clearKey) setAiApiKey("");
+      setAiFeedback({ type: "success", text: "Configuration IA enregistrée avec succès sur votre compte !" });
+    } catch (err) {
+      setAiFeedback({ type: "error", text: err instanceof Error ? err.message : "Erreur de sauvegarde." });
+    } finally {
+      setAiPending(false);
+    }
   }
 
-  async function synchronizeFromServer(localStock: Listing[], ownerId: string) {
+  async function testAiConnection() {
+    setAiTestResult({ status: "testing", message: "Test d'appel IA en cours..." });
+    setAiFeedback(null);
     try {
-      const response = await apiFetch("/api/vinted-pipeline?resource=stock");
-      if (!response.ok) throw new Error("Lecture serveur impossible");
-      const payload = await response.json() as { stock: Listing[] };
-      const merged = mergeStock(Array.isArray(payload.stock) ? payload.stock : [], localStock);
-      setHistory(merged);
-      localStorage.setItem(localHistoryKey(ownerId), JSON.stringify(merged));
-      const saveResponse = await apiFetch("/api/vinted-pipeline", {
+      const response = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "sync-stock", stock: merged }),
+        body: JSON.stringify({
+          action: "test-ai-config",
+          aiConfig: {
+            provider: aiProvider,
+            apiKey: aiApiKey.trim(),
+            omnirouteBaseUrl: aiOmnirouteUrl.trim(),
+            visionModel: aiVisionModel.trim(),
+            copyModel: aiCopyModel.trim(),
+          },
+        }),
       });
-      if (!saveResponse.ok) throw new Error("Écriture serveur impossible");
-      setSyncState("Synchronisé sur le serveur");
-    } catch {
-      setSyncState("Copie locale uniquement · serveur indisponible");
+      const payload = (await response.json()) as {
+        success: boolean;
+        providerLabel?: string;
+        providerId?: string;
+        aiStatus?: AiStatusSummary;
+        error?: string;
+      };
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || "Test de connexion IA échoué.");
+      }
+      if (payload.aiStatus) applyAiStatus(payload.aiStatus);
+      setAiTestResult({
+        status: "success",
+        message: `Connexion réussie avec ${payload.providerLabel || "le fournisseur IA"} !`,
+      });
+    } catch (err) {
+      setAiTestResult({
+        status: "error",
+        message: err instanceof Error ? err.message : "Échec du test de connexion.",
+      });
+    }
+  }
+
+  async function handleResendEmail(customEmail?: string) {
+    const emailToSend = (customEmail || verificationEmail || email).trim();
+    if (!emailToSend) return;
+    setResendPending(true);
+    setResendError("");
+    setResendNotice("");
+    try {
+      const client = supabaseRef.current;
+      if (!client) throw new Error("Client Supabase non initialisé.");
+      const redirectOrigin = typeof window !== "undefined" ? window.location.origin : undefined;
+      const { error: resendErr } = await client.auth.resend({
+        type: "signup",
+        email: emailToSend,
+        options: { emailRedirectTo: redirectOrigin },
+      });
+      if (resendErr) {
+        const msg = resendErr.message.toLowerCase();
+        if (msg.includes("rate limit") || msg.includes("security") || resendErr.status === 429) {
+          setResendNotice("Un e-mail vient déjà d'être envoyé. Merci de patienter une minute avant de redemander un envoi.");
+        } else {
+          throw resendErr;
+        }
+      } else {
+        setResendNotice(`Un nouvel e-mail de confirmation vient d'être envoyé à ${emailToSend} !`);
+        setResendCooldown(60);
+      }
+    } catch (err) {
+      setResendError(err instanceof Error ? err.message : "Impossible de renvoyer l'e-mail.");
+    } finally {
+      setResendPending(false);
     }
   }
 
@@ -488,26 +699,103 @@ export default function VintedDashboard() {
     event.preventDefault();
     setAuthError("");
     setAuthMessage("");
+    setShowResendButton(false);
+    setResendError("");
+    setResendNotice("");
     setAuthPending(true);
+    const targetEmail = email.trim();
+
     try {
       const client = supabaseRef.current;
       if (!client) throw new Error("Supabase n'est pas configuré.");
-      const result = authMode === "sign-up"
-        ? await client.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: window.location.origin } })
-        : await client.auth.signInWithPassword({ email: email.trim(), password });
-      if (result.error) throw result.error;
-      if (!result.data.session) {
-        setAuthMessage("Compte créé. Consulte ta messagerie pour confirmer l'adresse e-mail.");
-        return;
+
+      if (authMode === "sign-up") {
+        const redirectOrigin = typeof window !== "undefined" ? window.location.origin : undefined;
+        const { data, error: signUpError } = await client.auth.signUp({
+          email: targetEmail,
+          password,
+          options: {
+            emailRedirectTo: redirectOrigin,
+          },
+        });
+
+        if (signUpError) {
+          const msg = signUpError.message.toLowerCase();
+          if (msg.includes("already registered") || signUpError.status === 400 || signUpError.status === 422) {
+            setVerificationEmail(targetEmail);
+            setAuthError("Un compte existe déjà avec cette adresse e-mail. Si ton compte n'a pas encore été validé par e-mail, clique sur « Renvoyer l'e-mail de confirmation » ou passe sur « Se connecter ».");
+            setShowResendButton(true);
+            return;
+          }
+          if (msg.includes("rate limit") || msg.includes("security") || signUpError.status === 429) {
+            setVerificationEmail(targetEmail);
+            setAuthMode("verify-email");
+            setResendNotice("Un e-mail de confirmation a déjà été expédié. Vérifie ta boîte de réception et tes spams.");
+            return;
+          }
+          if (msg.includes("password")) {
+            throw new Error("Le mot de passe doit comporter au moins 6 caractères.");
+          }
+          throw signUpError;
+        }
+
+        // Cas protection énumération Supabase : si user.identities est vide, le compte existait déjà
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          setVerificationEmail(targetEmail);
+          setAuthError("Cette adresse e-mail possède déjà un compte. Connecte-toi ou vérifie tes e-mails pour le lien d'activation.");
+          setShowResendButton(true);
+          return;
+        }
+
+        // Compte créé avec succès, e-mail de confirmation requis !
+        if (!data.session) {
+          setVerificationEmail(targetEmail);
+          setAuthMode("verify-email");
+          setResendNotice("");
+          return;
+        }
+
+        // Si auto-confirm est activé sur Supabase :
+        if (data.user) {
+          const nextUserId = data.user.id;
+          const stored = readLocalHistory(nextUserId);
+          setHistory(stored);
+          setUserId(nextUserId);
+          setSignedInEmail(data.user.email || targetEmail);
+          setUnlocked(true);
+          await synchronizeFromServer(stored, nextUserId);
+          return;
+        }
+      } else {
+        // Connexion
+        const { data, error: signInError } = await client.auth.signInWithPassword({
+          email: targetEmail,
+          password,
+        });
+
+        if (signInError) {
+          const msg = signInError.message.toLowerCase();
+          if (msg.includes("email not confirmed")) {
+            setVerificationEmail(targetEmail);
+            setAuthMode("verify-email");
+            setResendNotice("Ton compte a bien été créé, mais ton adresse e-mail n'a pas encore été confirmée. Clique sur le lien reçu dans tes e-mails (pense à vérifier tes spams).");
+            return;
+          }
+          if (msg.includes("invalid login credentials")) {
+            throw new Error("Identifiants incorrects. Vérifie ton mot de passe ou clique sur l'onglet « Créer un compte » si tu n'en as pas encore.");
+          }
+          throw signInError;
+        }
+
+        if (!data.user) throw new Error("Supabase n'a pas renvoyé le compte connecté.");
+        const nextUserId = data.user.id;
+        const stored = readLocalHistory(nextUserId);
+        setHistory(stored);
+        setUserId(nextUserId);
+        setSignedInEmail(data.user.email || targetEmail);
+        setUnlocked(true);
+        await synchronizeFromServer(stored, nextUserId);
       }
-      if (!result.data.user) throw new Error("Supabase n'a pas renvoyé le compte connecté.");
-      const nextUserId = result.data.user.id;
-      const stored = readLocalHistory(nextUserId);
-      setHistory(stored);
-      setUserId(nextUserId);
-      setSignedInEmail(result.data.user.email || email.trim());
-      setUnlocked(true);
-      await synchronizeFromServer(stored, nextUserId);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Connexion impossible.");
     } finally {
@@ -527,14 +815,35 @@ export default function VintedDashboard() {
   }
 
   function uploadPhotos(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/")).slice(0, 8);
-    if (!files.length) return;
+    const rawFiles = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/"));
+    if (!rawFiles.length) return;
     setError("");
-    Promise.all(files.map(async (file, index) => ({
-      dataUrl: await photoToDataUrl(file),
-      angle: PHOTO_ANGLES[index] || `Détail ${index - 1}`,
-      name: file.name,
-    }))).then((newPhotos) => setPhotos(newPhotos)).catch((uploadError: Error) => setError(uploadError.message));
+
+    const remainingSlots = Math.max(0, 12 - photos.length);
+    if (remainingSlots <= 0) {
+      setError("Vous avez déjà atteint le maximum de 12 photos.");
+      event.target.value = "";
+      return;
+    }
+
+    const filesToProcess = rawFiles.slice(0, remainingSlots);
+    if (rawFiles.length > remainingSlots) {
+      setNotice(`Seules ${filesToProcess.length} photo(s) ont été ajoutées (limite de 12 atteinte).`);
+    }
+
+    Promise.all(
+      filesToProcess.map(async (file, index) => {
+        const absoluteIndex = photos.length + index;
+        return {
+          dataUrl: await photoToDataUrl(file),
+          angle: PHOTO_ANGLES[absoluteIndex] || `Photo ${absoluteIndex + 1}`,
+          name: file.name,
+        };
+      })
+    )
+      .then((newPhotos) => setPhotos((prev) => [...prev, ...newPhotos]))
+      .catch((uploadError: Error) => setError(uploadError.message));
+
     event.target.value = "";
   }
 
@@ -676,8 +985,12 @@ export default function VintedDashboard() {
   }
 
   async function runPipeline() {
-    if (photos.length < 3) {
-      setError("Ajoutez au minimum trois angles : vue globale, étiquette et détails.");
+    if (photos.length < 1) {
+      setError("Ajoutez au moins une photo de l'article pour lancer l'analyse (jusqu'à 12 photos).");
+      return;
+    }
+    if (photos.length > 12) {
+      setError("Vous pouvez ajouter jusqu'à 12 photos maximum.");
       return;
     }
     if (prixAchat && (!Number.isFinite(Number(prixAchat)) || Number(prixAchat) < 0)) {
@@ -696,7 +1009,17 @@ export default function VintedDashboard() {
       });
       const skuPayload = await skuResponse.json() as { success: boolean; skuId?: string; error?: string };
       if (!skuResponse.ok || !skuPayload.success || !skuPayload.skuId) throw new Error(skuPayload.error || "Réservation du SKU impossible.");
-      const analysisBody = await createAnalysisRequestBody(photos, prixAchat ? Number(prixAchat) : null, mode, skuPayload.skuId);
+      const analysisBody = await createAnalysisRequestBody(
+        photos,
+        prixAchat ? Number(prixAchat) : null,
+        mode,
+        skuPayload.skuId,
+        {
+          provider: aiProvider,
+          apiKey: aiApiKey.trim() || undefined,
+          omnirouteBaseUrl: aiOmnirouteUrl.trim() || undefined,
+        }
+      );
       const response = await apiFetch("/api/vinted-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -882,27 +1205,136 @@ export default function VintedDashboard() {
   const activeShippingLabel = shippingLabels[activeShippingIndex];
 
   if (!authReady) return <main className="auth-screen"><div className="auth-card"><RefreshCw className="size-5 animate-spin text-emerald-400" /><span>Initialisation du tableau de bord...</span></div></main>;
-  if (!unlocked) return (
-    <main className="auth-screen">
-      <section className="auth-card">
-        <div className="brand-mark"><Zap className="size-5 fill-current" /></div>
-        <p className="eyebrow">VINTED COO <span>·</span> ESPACE PRIVÉ</p>
-        <h1>{authMode === "sign-in" ? "Connexion à ton espace" : "Créer un compte"}</h1>
-        <p className="auth-copy">Connecte-toi avec ton compte Supabase pour retrouver ton stock et tes étiquettes QR.</p>
-        <form className="pin-form" onSubmit={authenticate}>
-          <label htmlFor="account-email">Adresse e-mail</label>
-          <div className="pin-input-wrap"><Mail className="size-4" /><input id="account-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} autoFocus required /></div>
-          <label htmlFor="account-password">Mot de passe</label>
-          <div className="pin-input-wrap"><LockKeyhole className="size-4" /><input id="account-password" type="password" autoComplete={authMode === "sign-up" ? "new-password" : "current-password"} minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} required /></div>
-          {authError && <p className="inline-error">{authError}</p>}
-          {authMessage && <p className="auth-copy">{authMessage}</p>}
-          <button className="primary-button w-full" type="submit" disabled={authPending}>{authPending ? <RefreshCw className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />}{authMode === "sign-in" ? "Se connecter" : "Créer mon compte"}<ArrowRight className="size-4 ml-auto" /></button>
-        </form>
-        <button className="text-link" type="button" onClick={() => { setAuthMode(authMode === "sign-in" ? "sign-up" : "sign-in"); setAuthError(""); setAuthMessage(""); }}>{authMode === "sign-in" ? "Créer un compte" : "J'ai déjà un compte"}</button>
-        <div className="auth-foot"><ShieldCheck className="size-4" /> Connexion sécurisée par Supabase Auth</div>
-      </section>
-    </main>
-  );
+  if (!unlocked) {
+    if (authMode === "verify-email") {
+      return (
+        <main className="auth-screen">
+          <section className="auth-card">
+            <div className="brand-mark text-emerald-400"><MailCheck className="size-5" /></div>
+            <p className="eyebrow">ACTIVATION DU COMPTE <span>·</span> VINTED COO</p>
+            <h1>Vérifie ta boîte de réception</h1>
+            <p className="auth-copy">
+              Un e-mail de confirmation vient d&apos;être envoyé à <strong>{verificationEmail || email}</strong>.
+            </p>
+            <div className="auth-notice-box">
+              <p>
+                <strong>Étape 1 :</strong> Ouvre l&apos;e-mail de validation et clique sur le lien pour confirmer ton adresse.<br />
+                <em>Pense à vérifier tes spams ou courriers indésirables si tu ne le trouves pas.</em>
+              </p>
+            </div>
+            {resendNotice && <div className="alert-success mt-2"><CheckCircle2 className="size-4 shrink-0" />{resendNotice}</div>}
+            {resendError && <div className="alert-error mt-2"><ShieldAlert className="size-4 shrink-0" />{resendError}</div>}
+            <div className="auth-actions-stack">
+              <button
+                className="secondary-button w-full"
+                type="button"
+                disabled={resendCooldown > 0 || resendPending}
+                onClick={() => void handleResendEmail()}
+              >
+                {resendPending ? <RefreshCw className="size-4 animate-spin" /> : <Send className="size-4" />}
+                {resendCooldown > 0 ? `Patienter ${resendCooldown}s avant renvoi` : "Renvoyer l'e-mail de confirmation"}
+              </button>
+              <button
+                className="primary-button w-full"
+                type="button"
+                onClick={() => {
+                  setAuthMode("sign-in");
+                  setAuthError("");
+                  setAuthMessage("Une fois le lien dans ton e-mail validé, connecte-toi ci-dessous.");
+                }}
+              >
+                <CheckCircle2 className="size-4" /> J&apos;ai validé mon e-mail · Me connecter
+              </button>
+            </div>
+            <button
+              className="text-link mt-4"
+              type="button"
+              onClick={() => { setAuthMode("sign-up"); setAuthError(""); setAuthMessage(""); }}
+            >
+              Changer d&apos;adresse e-mail
+            </button>
+            <div className="auth-foot"><ShieldCheck className="size-4" /> Connexion sécurisée par Supabase Auth</div>
+          </section>
+        </main>
+      );
+    }
+
+    return (
+      <main className="auth-screen">
+        <section className="auth-card">
+          <div className="brand-mark"><Zap className="size-5 fill-current" /></div>
+          <p className="eyebrow">VINTED COO <span>·</span> ESPACE PRIVÉ</p>
+          <h1>{authMode === "sign-in" ? "Connexion à ton espace" : "Créer un nouveau compte"}</h1>
+          <p className="auth-copy">
+            {authMode === "sign-in"
+              ? "Connecte-toi pour accéder à ton inventaire, tes annonces et ton analyseur IA."
+              : "Crée ton compte en quelques secondes. Un e-mail de confirmation te sera envoyé pour sécuriser ton accès."}
+          </p>
+
+          <div className="auth-tabs" role="tablist">
+            <button
+              type="button"
+              className={authMode === "sign-in" ? "active" : ""}
+              onClick={() => { setAuthMode("sign-in"); setAuthError(""); setAuthMessage(""); setShowResendButton(false); }}
+            >
+              Se connecter
+            </button>
+            <button
+              type="button"
+              className={authMode === "sign-up" ? "active" : ""}
+              onClick={() => { setAuthMode("sign-up"); setAuthError(""); setAuthMessage(""); }}
+            >
+              Créer un compte
+            </button>
+          </div>
+
+          <form className="pin-form" onSubmit={authenticate}>
+            <label htmlFor="account-email">Adresse e-mail</label>
+            <div className="pin-input-wrap"><Mail className="size-4" /><input id="account-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} autoFocus required /></div>
+            <label htmlFor="account-password">Mot de passe</label>
+            <div className="pin-input-wrap"><LockKeyhole className="size-4" /><input id="account-password" type="password" autoComplete={authMode === "sign-up" ? "new-password" : "current-password"} minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} required /></div>
+            {authError && <p className="inline-error">{authError}</p>}
+            {authMessage && <p className="auth-copy text-emerald-400">{authMessage}</p>}
+            {resendNotice && <p className="alert-success mt-2"><CheckCircle2 className="size-4 shrink-0" />{resendNotice}</p>}
+            {resendError && <p className="alert-error mt-2"><ShieldAlert className="size-4 shrink-0" />{resendError}</p>}
+
+            {showResendButton && (
+              <div className="auth-alert-amber">
+                <span>Tu n&apos;as pas reçu le lien d&apos;activation ou il a expiré ?</span>
+                <button
+                  type="button"
+                  onClick={() => void handleResendEmail()}
+                  disabled={resendPending || resendCooldown > 0}
+                >
+                  {resendCooldown > 0 ? `Patienter ${resendCooldown}s...` : "Clique ici pour renvoyer l'e-mail de confirmation"}
+                </button>
+              </div>
+            )}
+
+            <button className="primary-button w-full mt-3" type="submit" disabled={authPending}>
+              {authPending ? <RefreshCw className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />}
+              {authMode === "sign-in" ? "Se connecter" : "Créer mon compte"}
+              <ArrowRight className="size-4 ml-auto" />
+            </button>
+          </form>
+
+          <button
+            className="text-link mt-3"
+            type="button"
+            onClick={() => {
+              setAuthMode(authMode === "sign-in" ? "sign-up" : "sign-in");
+              setAuthError("");
+              setAuthMessage("");
+              setShowResendButton(false);
+            }}
+          >
+            {authMode === "sign-in" ? "Pas encore de compte ? Créer un compte" : "Déjà inscrit ? Me connecter"}
+          </button>
+          <div className="auth-foot"><ShieldCheck className="size-4" /> Connexion sécurisée par Supabase Auth</div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="dashboard-shell">
@@ -915,8 +1347,39 @@ export default function VintedDashboard() {
       <div className="dashboard-content" id="top">
         <section className="page-heading">
           <div><p className="eyebrow">COCKPIT DE REVENTE <span>·</span> {new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Le stock, <span>sous contrôle.</span></h1><p className="heading-copy">Analysez, arbitrez et préparez vos prochaines annonces depuis un seul poste.</p></div>
-          <div className="heading-actions"><span className="secure-pill"><ShieldCheck className="size-3.5" /> SESSION CHIFFRÉE</span><button className="primary-button" onClick={() => { setView("pipeline"); setResult(null); }}><Plus className="size-4" /> Nouvel article</button></div>
+          <div className="heading-actions">
+            <span className="secure-pill"><ShieldCheck className="size-3.5" /> SESSION CHIFFRÉE</span>
+            <button
+              type="button"
+              className={`icon-action ai-status-button ${aiStatus && (!aiStatus.ready || aiStatus.localOnlyWarning) ? "ai-status-warning" : ""}`}
+              onClick={() => { setAiModalOpen(true); setAiFeedback(null); }}
+              title="Configurer le moteur d'intelligence artificielle"
+            >
+              <Sparkles className="size-3.5" />
+              <span>{aiStatus?.ready && !aiStatus.localOnlyWarning ? (aiStatus.activeProviderLabel || "IA Active") : "Moteur IA"}</span>
+            </button>
+            <button className="primary-button" onClick={() => { setView("pipeline"); setResult(null); }}><Plus className="size-4" /> Nouvel article</button>
+          </div>
         </section>
+
+        {aiStatus && (!aiStatus.ready || aiStatus.localOnlyWarning) && (
+          <div className="alert-warning ai-cloud-callout">
+            <ShieldAlert className="size-4 shrink-0" />
+            <div>
+              <strong>
+                {!aiStatus.ready
+                  ? "Moteur IA non configuré pour le site déployé"
+                  : "Attention : mode local OmniRoute (localhost:20128) inaccessible sur le site déployé"}
+              </strong>
+              <span>
+                Pour que l&apos;analyse des photos (titre, description, prix) fonctionne pour tout le monde sur le site déployé, ajoutez une clé Cloud gratuite (Google Gemini ou OpenRouter) ou configurez <code>GEMINI_API_KEY</code> sur Vercel.
+              </span>
+              <button type="button" className="text-link" onClick={() => { setAiModalOpen(true); setAiFeedback(null); }}>
+                Configurer l&apos;IA Cloud maintenant <ArrowRight className="size-3" />
+              </button>
+            </div>
+          </div>
+        )}
 
         <section className="metrics-grid" aria-label="Indicateurs globaux">
           <article className="metric-tile"><span className="metric-icon green"><Wallet className="size-4" /></span><span className="metric-label">Capital engagé</span><strong>{euro(committedCapital)}</strong><small>En transit et prêt à publier</small></article>
@@ -937,10 +1400,66 @@ export default function VintedDashboard() {
           <section className="pipeline-layout">
             <div className="panel intake-panel">
               <div className="panel-heading"><div><span className="step-label">01 / INGESTION</span><h2>Nouvel article</h2></div><span className="panel-heading-icon"><ImagePlus className="size-4" /></span></div>
-              <label className="field-label" htmlFor="photo-upload">Photos multi-angles <span>3 minimum · 8 maximum</span></label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="field-label !mb-0" htmlFor="photo-upload">Photos multi-angles <span>Jusqu&apos;à 12 photos</span></label>
+                {photos.length > 0 && (
+                  <button
+                    type="button"
+                    className="text-xs text-red-400 hover:text-red-300 cursor-pointer font-medium transition-colors"
+                    onClick={(e) => { e.preventDefault(); setPhotos([]); }}
+                  >
+                    Tout effacer
+                  </button>
+                )}
+              </div>
               <label htmlFor="photo-upload" className="upload-zone">
                 <input id="photo-upload" type="file" accept="image/jpeg,image/png,image/webp,image/*" multiple onChange={uploadPhotos} />
-                {photos.length ? <><div className="photo-count"><ImagePlus className="size-4" />{photos.length} photo{photos.length > 1 ? "s" : ""} sélectionnée{photos.length > 1 ? "s" : ""}</div><div className="photo-grid">{photos.map((photo, index) => <div className="photo-preview" key={`${photo.name}-${index}`}><Image src={photo.dataUrl} alt={photo.angle} fill unoptimized sizes="(max-width: 600px) 28vw, 100px" /><span>{photo.angle}</span><button type="button" onClick={(event) => { event.preventDefault(); setPhotos(photos.filter((_, photoIndex) => photoIndex !== index)); }} aria-label={`Retirer ${photo.name}`}><X className="size-3" /></button></div>)}</div><span className="upload-again"><Plus className="size-3" /> Remplacer la sélection</span></> : <><span className="upload-icon"><Upload className="size-5" /></span><strong>Choisir les photos de l&apos;article</strong><span>JPG, PNG ou WebP · sélection multiple</span><div className="angle-chips">{PHOTO_ANGLES.map((angle, index) => <span key={angle}><i>{String(index + 1).padStart(2, "0")}</i>{angle}</span>)}</div></>}
+                {photos.length ? (
+                  <>
+                    <div className="photo-count">
+                      <ImagePlus className="size-4" />
+                      {photos.length} photo{photos.length > 1 ? "s" : ""} sélectionnée{photos.length > 1 ? "s" : ""} (max 12)
+                    </div>
+                    <div className="photo-grid">
+                      {photos.map((photo, index) => (
+                        <div className="photo-preview" key={`${photo.name}-${index}`}>
+                          <Image src={photo.dataUrl} alt={photo.angle} fill unoptimized sizes="(max-width: 600px) 28vw, 100px" />
+                          <span>{photo.angle}</span>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              setPhotos(photos.filter((_, photoIndex) => photoIndex !== index));
+                            }}
+                            aria-label={`Retirer ${photo.name}`}
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    {photos.length < 12 ? (
+                      <span className="upload-again">
+                        <Plus className="size-3" /> Ajouter d&apos;autres photos ({12 - photos.length} restante{12 - photos.length > 1 ? "s" : ""})
+                      </span>
+                    ) : (
+                      <span className="upload-again text-amber-300">
+                        Limite maximale de 12 photos atteinte
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <span className="upload-icon"><Upload className="size-5" /></span>
+                    <strong>Choisir les photos de l&apos;article</strong>
+                    <span>JPG, PNG ou WebP · 1 à 12 photos</span>
+                    <div className="angle-chips">
+                      {PHOTO_ANGLES.slice(0, 4).map((angle, index) => (
+                        <span key={angle}><i>{String(index + 1).padStart(2, "0")}</i>{angle}</span>
+                      ))}
+                    </div>
+                  </>
+                )}
               </label>
               <div className="field-row"><label className="field-label" htmlFor="purchase-price">Prix d&apos;achat <span>Facultatif, estimation IA sinon</span></label><div className="price-input"><span>€</span><input id="purchase-price" type="number" min="0" step="0.01" placeholder="À estimer" value={prixAchat} onChange={(event) => setPrixAchat(event.target.value)} /></div></div>
               <div className="field-label mode-title">Mode opératoire</div>
@@ -1039,6 +1558,194 @@ export default function VintedDashboard() {
         )}
 
         {scannerOpen && <div className="modal-backdrop" role="presentation"><section className="scanner-modal" role="dialog" aria-modal="true" aria-labelledby="scanner-title"><div className="panel-heading"><div><span className="step-label">RECHERCHE DANS LE STOCK</span><h2 id="scanner-title">Scanner un SKU</h2></div><button className="icon-action" onClick={() => setScannerOpen(false)} aria-label="Fermer le scanner"><X className="size-4" /></button></div><QrScanner onScan={handleQrScan} /></section></div>}
+
+        {aiModalOpen && (
+          <div className="modal-backdrop" role="presentation">
+            <section className="ai-config-modal panel" role="dialog" aria-modal="true" aria-labelledby="ai-modal-title">
+              <div className="panel-heading">
+                <div>
+                  <span className="step-label">MOTEUR INTELLIGENCE ARTIFICIELLE</span>
+                  <h2 id="ai-modal-title">Configuration IA Cloud</h2>
+                </div>
+                <button
+                  className="icon-action"
+                  type="button"
+                  onClick={() => { setAiModalOpen(false); setAiFeedback(null); setAiTestResult({ status: "idle", message: "" }); }}
+                  aria-label="Fermer la configuration IA"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+
+              <div className="ai-status-box">
+                <div>
+                  <span className="text-xs text-gray-400">Fournisseur actif :</span>
+                  <strong>{aiStatus?.activeProviderLabel || "Aucun moteur configuré"}</strong>
+                  <small className={aiStatus?.ready && !aiStatus?.localOnlyWarning ? "green-text" : "text-amber-400"}>
+                    {aiStatus?.ready
+                      ? (aiStatus.localOnlyWarning ? "⚠ Mode local OmniRoute (inaccessible hors de votre machine)" : "✓ Prêt pour l'analyse sur le site déployé")
+                      : "⚠ Aucune clé Cloud configurée"}
+                  </small>
+                </div>
+                <span className={`status ${aiStatus?.ready && !aiStatus?.localOnlyWarning ? "status-ready" : "status-pending"}`}>
+                  {aiStatus?.ready && !aiStatus?.localOnlyWarning ? "Actif" : "À configurer"}
+                </span>
+              </div>
+
+              <p className="ai-modal-copy">
+                Pour que l&apos;analyse photo et la rédaction des annonces fonctionnent pour tout le monde <strong>même avec le site déployé</strong>, vous pouvez soit renseigner une clé Cloud sur votre compte ci-dessous, soit configurer <code>GEMINI_API_KEY</code> sur Vercel.
+              </p>
+
+              <div className="ai-form-fields">
+                <label htmlFor="ai-provider-select">Fournisseur d&apos;IA</label>
+                <select
+                  id="ai-provider-select"
+                  className="ai-select"
+                  value={aiProvider}
+                  onChange={(e) => {
+                    setAiProvider(e.target.value as AiProviderType);
+                    setAiFeedback(null);
+                    setAiTestResult({ status: "idle", message: "" });
+                  }}
+                >
+                  {Object.entries(AI_PROVIDERS).map(([key, info]) => (
+                    <option key={key} value={key}>{info.label}</option>
+                  ))}
+                </select>
+                <p className="ai-helper-note">{AI_PROVIDERS[aiProvider]?.desc}</p>
+
+                {aiProvider !== "omniroute" && (
+                  <>
+                    <div className="flex items-center justify-between mt-2">
+                      <label htmlFor="ai-api-key">
+                        Clé API {aiProvider === "auto" ? "Cloud (Optionnel)" : AI_PROVIDERS[aiProvider]?.label}
+                      </label>
+                      {AI_PROVIDERS[aiProvider]?.keyUrl && (
+                        <a
+                          href={AI_PROVIDERS[aiProvider].keyUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-link flex items-center gap-1 text-xs"
+                        >
+                          <ExternalLink className="size-3" /> Obtenir une clé {aiProvider === "gemini" ? "gratuite" : ""}
+                        </a>
+                      )}
+                    </div>
+                    <input
+                      id="ai-api-key"
+                      className="ai-input"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={aiStatus?.savedConfig.hasApiKey ? `Clé enregistrée (${aiStatus.savedConfig.maskedApiKey})` : (AI_PROVIDERS[aiProvider]?.placeholder || "Colle ta clé API ici")}
+                      value={aiApiKey}
+                      onChange={(e) => setAiApiKey(e.target.value)}
+                    />
+                    {aiStatus?.savedConfig.hasApiKey && !aiApiKey && (
+                      <p className="ai-helper-note text-emerald-400">
+                        ✓ Une clé est déjà enregistrée sur votre compte ({aiStatus.savedConfig.maskedApiKey}). Saisissez une nouvelle clé pour la remplacer.
+                      </p>
+                    )}
+                  </>
+                )}
+
+                {aiProvider === "omniroute" && (
+                  <>
+                    <label htmlFor="omniroute-url" className="mt-2">URL OmniRoute</label>
+                    <input
+                      id="omniroute-url"
+                      className="ai-input"
+                      type="text"
+                      placeholder="Ex: https://mon-omniroute.com/v1 ou http://localhost:20128/v1"
+                      value={aiOmnirouteUrl}
+                      onChange={(e) => setAiOmnirouteUrl(e.target.value)}
+                    />
+                    <p className="ai-helper-note">
+                      Sur le site déployé (Vercel), l&apos;URL doit être publique (ex: tunnel Cloudflare ou VPS). <code>localhost</code> ne fonctionne qu&apos;en local sur votre propre machine.
+                    </p>
+                    <label htmlFor="omniroute-key" className="mt-2">Clé API OmniRoute</label>
+                    <input
+                      id="omniroute-key"
+                      className="ai-input"
+                      type="password"
+                      placeholder="sk-xxxxxxxxxxxxxxxx"
+                      value={aiApiKey}
+                      onChange={(e) => setAiApiKey(e.target.value)}
+                    />
+                  </>
+                )}
+
+                <details className="ai-advanced-details">
+                  <summary>Modèles personnalisés (avancé)</summary>
+                  <div className="ai-advanced-grid">
+                    <label>
+                      <span>Modèle Vision</span>
+                      <input
+                        className="ai-input"
+                        placeholder="Ex: gemini-2.0-flash"
+                        value={aiVisionModel}
+                        onChange={(e) => setAiVisionModel(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Modèle Rédaction</span>
+                      <input
+                        className="ai-input"
+                        placeholder="Ex: auto/claude-sonnet"
+                        value={aiCopyModel}
+                        onChange={(e) => setAiCopyModel(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </details>
+              </div>
+
+              {aiTestResult.status !== "idle" && (
+                <div className={`mt-3 p-3 rounded text-xs flex items-center gap-2 ${aiTestResult.status === "testing" ? "bg-zinc-800 text-zinc-300" : aiTestResult.status === "success" ? "bg-emerald-950/60 border border-emerald-800 text-emerald-300" : "bg-red-950/60 border border-red-800 text-red-300"}`}>
+                  {aiTestResult.status === "testing" ? <RefreshCw className="size-4 animate-spin shrink-0" /> : aiTestResult.status === "success" ? <CheckCircle2 className="size-4 shrink-0 text-emerald-400" /> : <ShieldAlert className="size-4 shrink-0 text-red-400" />}
+                  <span>{aiTestResult.message}</span>
+                </div>
+              )}
+
+              {aiFeedback && (
+                <div className={`mt-3 p-3 rounded text-xs flex items-center gap-2 ${aiFeedback.type === "success" ? "bg-emerald-950/60 border border-emerald-800 text-emerald-300" : "bg-red-950/60 border border-red-800 text-red-300"}`}>
+                  {aiFeedback.type === "success" ? <CheckCircle2 className="size-4 shrink-0 text-emerald-400" /> : <ShieldAlert className="size-4 shrink-0 text-red-400" />}
+                  <span>{aiFeedback.text}</span>
+                </div>
+              )}
+
+              <div className="ai-modal-actions">
+                {aiStatus?.savedConfig.hasApiKey && (
+                  <button
+                    type="button"
+                    className="danger-button mr-auto"
+                    disabled={aiPending}
+                    onClick={() => void saveAiConfiguration(true)}
+                  >
+                    Supprimer ma clé
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={aiPending || aiTestResult.status === "testing"}
+                  onClick={() => void testAiConnection()}
+                >
+                  {aiTestResult.status === "testing" ? <RefreshCw className="size-4 animate-spin" /> : <Zap className="size-4" />}
+                  Tester la connexion
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={aiPending}
+                  onClick={() => void saveAiConfiguration(false)}
+                >
+                  {aiPending ? <RefreshCw className="size-4 animate-spin" /> : <LockKeyhole className="size-4" />}
+                  Enregistrer sur mon compte
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
 
         <footer className="app-footer"><span>VINTED COO <span>·</span> PRIVATE INVENTORY DESK</span><span>Les recommandations IA sont indicatives. Authentifiez et vérifiez chaque article avant publication.</span></footer>
       </div>

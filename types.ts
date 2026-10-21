@@ -58,12 +58,14 @@ export interface SourcingOpportunity {
   difficulty: 'Facile' | 'Moyen' | 'Expert';
 }
 
-export enum LoadingState {
-  IDLE = 'IDLE',
-  ANALYZING = 'ANALYZING',
-  SUCCESS = 'SUCCESS',
-  ERROR = 'ERROR'
-}
+export const LoadingState = {
+  IDLE: 'IDLE',
+  ANALYZING: 'ANALYZING',
+  SUCCESS: 'SUCCESS',
+  ERROR: 'ERROR'
+} as const;
+
+export type LoadingState = typeof LoadingState[keyof typeof LoadingState];
 
 export type AppView = 'selling' | 'sourcing' | 'accounting' | 'profile';
 

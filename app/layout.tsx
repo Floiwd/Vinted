@@ -25,6 +25,41 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="fr"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if (typeof window !== 'undefined') {
+                window.addEventListener('error', function(e) {
+                  var filename = e.filename || '';
+                  var message = e.message || '';
+                  if (
+                    filename.includes('webkit-masked-url') ||
+                    filename.includes('safari-extension') ||
+                    filename.includes('chrome-extension') ||
+                    message.includes('tabs:outgoing.message') ||
+                    message.includes('No Listener')
+                  ) {
+                    e.stopImmediatePropagation();
+                    e.preventDefault();
+                  }
+                }, true);
+                window.addEventListener('unhandledrejection', function(e) {
+                  var reason = e.reason ? (e.reason.message || String(e.reason)) : '';
+                  if (
+                    reason.includes('tabs:outgoing.message') ||
+                    reason.includes('No Listener') ||
+                    reason.includes('webkit-masked-url')
+                  ) {
+                    e.stopImmediatePropagation();
+                    e.preventDefault();
+                  }
+                }, true);
+              }
+            `,
+          }}
+        />
+      </head>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
