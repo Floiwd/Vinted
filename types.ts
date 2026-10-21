@@ -19,6 +19,25 @@ export interface MarketVerdict {
   conseil_rotation: string;
 }
 
+export interface SourcingAnalysis {
+  verdict: "FONCE" | "NEGOCIE" | "SKIP";
+  badge: string;
+  titre: string;
+  avis_sincere: string;
+  prix_affiche_vendeur: number;
+  frais_estimes: number;
+  cout_total_achat: number;
+  prix_revente_rapide: number;
+  prix_revente_optimiste: number;
+  benefice_net_estime: number;
+  roi_estime_pourcent: number;
+  delai_vente_estime: string;
+  offre_suggeree: number;
+  message_offre: string;
+  points_forts: string[];
+  points_vigilance: string[];
+}
+
 export interface ListingData {
   title: string;
   titre_court?: string;
@@ -35,6 +54,7 @@ export interface ListingData {
   defauts_transparence?: string;
   hashtags?: string;
   market_verdict?: MarketVerdict;
+  sourcing_analysis?: SourcingAnalysis;
   purchasePrice?: string; // Prix d'achat utilisateur
   minPrice?: string; // [NEW] Prix min estimé
   maxPrice?: string; // [NEW] Prix max estimé

@@ -58,7 +58,7 @@ const AI_PROVIDERS: Record<AiProviderType, { label: string; desc: string; keyUrl
   },
 };
 
-type Mode = "SEMAINE_ACHAT" | "WEEKEND_SHOOTING";
+type Mode = "SEMAINE_ACHAT" | "WEEKEND_SHOOTING" | "SOURCING_CAPTURE";
 type Status = "EN_TRANSIT" | "A_COMPLETER" | "PRET_A_PUBLIER" | "EN_LIGNE" | "VENDU";
 type Photo = { dataUrl: string; angle: string; name: string };
 type Checklist = { size: boolean; condition: boolean; material: boolean; photos: boolean; authenticity: boolean };
@@ -78,6 +78,25 @@ type MarketVerdict = {
   conseil_rotation: string;
 };
 
+type SourcingAnalysis = {
+  verdict: "FONCE" | "NEGOCIE" | "SKIP";
+  badge: string;
+  titre: string;
+  avis_sincere: string;
+  prix_affiche_vendeur: number;
+  frais_estimes: number;
+  cout_total_achat: number;
+  prix_revente_rapide: number;
+  prix_revente_optimiste: number;
+  benefice_net_estime: number;
+  roi_estime_pourcent: number;
+  delai_vente_estime: string;
+  offre_suggeree: number;
+  message_offre: string;
+  points_forts: string[];
+  points_vigilance: string[];
+};
+
 type Listing = {
   sku_id: string; marque: string; modele: string; categorie: string; taille: string; etat: string;
   caracteristiques: string[]; mesures: Record<string, string | number> | null;
@@ -86,6 +105,7 @@ type Listing = {
   creneau_publi: string; created_at?: string; statut: Status; titre_seo: string; titre_court?: string; description: string; hashtags: string;
   message_nego: string; sync_sheet: boolean; prix_vendu?: number; frais_reels?: number;
   checklist?: Checklist; market?: MarketSnapshot; market_verdict?: MarketVerdict;
+  sourcing_analysis?: SourcingAnalysis;
   defauts_observes?: string[]; defauts_transparence?: string;
   date_publication?: string; date_vente?: string;
   emplacement?: string; fournisseur?: string; date_achat?: string; date_limite_retour?: string;
@@ -1510,9 +1530,41 @@ export default function VintedDashboard() {
         {view === "pipeline" ? (
           <section className="pipeline-layout">
             <div className="panel intake-panel">
-              <div className="panel-heading"><div><span className="step-label">01 / INGESTION</span><h2>Nouvel article</h2></div><span className="panel-heading-icon"><ImagePlus className="size-4" /></span></div>
+              <div className="panel-heading">
+                <div>
+                  <span className="step-label">01 / INGESTION</span>
+                  <h2>{mode === "SOURCING_CAPTURE" ? "Arbitrage Achat Sourcing" : "Nouvel article"}</h2>
+                </div>
+                <span className="panel-heading-icon">
+                  {mode === "SOURCING_CAPTURE" ? <Search className="size-4 text-amber-400" /> : <ImagePlus className="size-4" />}
+                </span>
+              </div>
+
+              {/* Toggle Mode: Vente vs Sourcing Capture */}
+              <div className="intake-mode-toggle">
+                <button
+                  type="button"
+                  className={`intake-mode-btn ${mode !== "SOURCING_CAPTURE" ? "active" : ""}`}
+                  onClick={() => setMode("WEEKEND_SHOOTING")}
+                >
+                  <Tag className="size-3.5" />
+                  <span>Vente (Mes articles)</span>
+                </button>
+                <button
+                  type="button"
+                  className={`intake-mode-btn ${mode === "SOURCING_CAPTURE" ? "active sourcing-active" : ""}`}
+                  onClick={() => setMode("SOURCING_CAPTURE")}
+                >
+                  <Search className="size-3.5" />
+                  <span>Arbitrage Achat (Capture)</span>
+                </button>
+              </div>
+
               <div className="flex items-center justify-between mb-1">
-                <label className="field-label !mb-0" htmlFor="photo-upload">Photos multi-angles <span>Jusqu&apos;à 12 photos</span></label>
+                <label className="field-label !mb-0" htmlFor="photo-upload">
+                  {mode === "SOURCING_CAPTURE" ? "Captures d'écran de l'annonce" : "Photos multi-angles"}
+                  <span>{mode === "SOURCING_CAPTURE" ? "1 à 4 captures d'écran" : "Jusqu'à 12 photos"}</span>
+                </label>
                 {photos.length > 0 && (
                   <button
                     type="button"
@@ -1529,7 +1581,7 @@ export default function VintedDashboard() {
                   <>
                     <div className="photo-count">
                       <ImagePlus className="size-4" />
-                      {photos.length} photo{photos.length > 1 ? "s" : ""} sélectionnée{photos.length > 1 ? "s" : ""} (max 12)
+                      {photos.length} image{photos.length > 1 ? "s" : ""} sélectionnée{photos.length > 1 ? "s" : ""}
                     </div>
                     <div className="photo-grid">
                       {photos.map((photo, index) => (
@@ -1551,13 +1603,24 @@ export default function VintedDashboard() {
                     </div>
                     {photos.length < 12 ? (
                       <span className="upload-again">
-                        <Plus className="size-3" /> Ajouter d&apos;autres photos ({12 - photos.length} restante{12 - photos.length > 1 ? "s" : ""})
+                        <Plus className="size-3" /> Ajouter d&apos;autres captures ({12 - photos.length} restante{12 - photos.length > 1 ? "s" : ""})
                       </span>
                     ) : (
                       <span className="upload-again text-amber-300">
-                        Limite maximale de 12 photos atteinte
+                        Limite maximale atteinte
                       </span>
                     )}
+                  </>
+                ) : mode === "SOURCING_CAPTURE" ? (
+                  <>
+                    <span className="upload-icon"><Search className="size-5 text-amber-400" /></span>
+                    <strong>Déposer la capture d&apos;écran de l&apos;annonce</strong>
+                    <span>Annonce Vinted, Leboncoin, Depop... (1 à 4 captures)</span>
+                    <div className="angle-chips">
+                      <span><i>01</i>Capture d&apos;annonce</span>
+                      <span><i>02</i>Photos vendeur</span>
+                      <span><i>03</i>Étiquette vendeur</span>
+                    </div>
                   </>
                 ) : (
                   <>
@@ -1572,10 +1635,45 @@ export default function VintedDashboard() {
                   </>
                 )}
               </label>
-              <div className="field-row"><label className="field-label" htmlFor="purchase-price">Prix d&apos;achat <span>Facultatif, estimation IA sinon</span></label><div className="price-input"><span>€</span><input id="purchase-price" type="number" min="0" step="0.01" placeholder="À estimer" value={prixAchat} onChange={(event) => setPrixAchat(event.target.value)} /></div></div>
-              <div className="field-label mode-title">Mode opératoire</div>
-              <div className="mode-switch"><button onClick={() => setMode("SEMAINE_ACHAT")} className={mode === "SEMAINE_ACHAT" ? "active" : ""}><span className="mode-dot green-dot" /><span><b>Sourcing semaine</b><small>Négociation activée</small></span></button><button onClick={() => setMode("WEEKEND_SHOOTING")} className={mode === "WEEKEND_SHOOTING" ? "active" : ""}><span className="mode-dot blue-dot" /><span><b>Session week-end</b><small>Préparation publication</small></span></button></div>
-              {prixAchat ? <div className="formula-preview"><div><span>CTA TTC estimé</span><strong>{euro(ctaPreview)}</strong></div><ArrowRight className="size-4" /><div><span>Prix minimum x2</span><strong>{euro(minPreview)}</strong></div></div> : <div className="formula-hint"><ShieldAlert className="size-4" /> Le prix d&apos;achat cible sera estimé à partir des photos.</div>}
+              <div className="field-row">
+                <label className="field-label" htmlFor="purchase-price">
+                  {mode === "SOURCING_CAPTURE" ? "Prix affiché sur l'annonce" : "Prix d'achat"}
+                  <span>{mode === "SOURCING_CAPTURE" ? "Facultatif, lu sur la capture" : "Facultatif, estimation IA sinon"}</span>
+                </label>
+                <div className="price-input">
+                  <span>€</span>
+                  <input id="purchase-price" type="number" min="0" step="0.01" placeholder="À estimer" value={prixAchat} onChange={(event) => setPrixAchat(event.target.value)} />
+                </div>
+              </div>
+
+              {mode !== "SOURCING_CAPTURE" && (
+                <>
+                  <div className="field-label mode-title">Mode opératoire</div>
+                  <div className="mode-switch">
+                    <button onClick={() => setMode("SEMAINE_ACHAT")} className={mode === "SEMAINE_ACHAT" ? "active" : ""}>
+                      <span className="mode-dot green-dot" />
+                      <span><b>Sourcing semaine</b><small>Négociation activée</small></span>
+                    </button>
+                    <button onClick={() => setMode("WEEKEND_SHOOTING")} className={mode === "WEEKEND_SHOOTING" ? "active" : ""}>
+                      <span className="mode-dot blue-dot" />
+                      <span><b>Session week-end</b><small>Préparation publication</small></span>
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {prixAchat ? (
+                <div className="formula-preview">
+                  <div><span>{mode === "SOURCING_CAPTURE" ? "Coût total estimé" : "CTA TTC estimé"}</span><strong>{euro(ctaPreview)}</strong></div>
+                  <ArrowRight className="size-4" />
+                  <div><span>Objectif minimum x2</span><strong>{euro(minPreview)}</strong></div>
+                </div>
+              ) : (
+                <div className="formula-hint">
+                  <ShieldAlert className="size-4" />
+                  {mode === "SOURCING_CAPTURE" ? "Le prix vendeur et les frais Vinted seront extraits de la capture." : "Le prix d'achat cible sera estimé à partir des photos."}
+                </div>
+              )}
               {error && <div className="alert-error"><ShieldAlert className="size-4 shrink-0" />{error}</div>}
               {notice && <div className="alert-success"><CheckCircle2 className="size-4 shrink-0" />{notice}</div>}
               {loading && (
@@ -1588,8 +1686,16 @@ export default function VintedDashboard() {
                   <small>{progressLabel}</small>
                 </div>
               )}
-              <button className="primary-button pipeline-submit" disabled={loading} onClick={runPipeline}>{loading ? <><RefreshCw className="size-4 animate-spin" /> Gemini analyse les photos · Claude rédige...</> : <><Zap className="size-4 fill-current" /> Lancer l&apos;analyse IA <ArrowRight className="size-4 ml-auto" /></>}</button>
-              <p className="privacy-note"><LockKeyhole className="size-3" /> Photos transmises au modèle IA, non conservées dans l&apos;historique local.</p>
+              <button className="primary-button pipeline-submit" disabled={loading} onClick={runPipeline}>
+                {loading ? (
+                  <><RefreshCw className="size-4 animate-spin" /> Analyse IA en cours...</>
+                ) : mode === "SOURCING_CAPTURE" ? (
+                  <><Zap className="size-4 fill-current text-amber-400" /> Arbitrer cet achat & avis sincère <ArrowRight className="size-4 ml-auto" /></>
+                ) : (
+                  <><Zap className="size-4 fill-current" /> Lancer l&apos;analyse IA <ArrowRight className="size-4 ml-auto" /></>
+                )}
+              </button>
+              <p className="privacy-note"><LockKeyhole className="size-3" /> Images transmises au modèle IA, non conservées dans l&apos;historique local.</p>
             </div>
 
             <div className="result-column">
@@ -1608,6 +1714,103 @@ export default function VintedDashboard() {
                       <span>{result.market_verdict?.verdict_label || (result.prix_revente < result.prix_min_x2 ? "⚠️ sous seuil x2" : "Marge saine")}</span>
                     </div>
                   </div>
+
+                  {/* Fiche d'Arbitrage Achat Sourcing (si capture d'annonce) */}
+                  {result.sourcing_analysis && (
+                    <div className={`sourcing-card sourcing-verdict-${result.sourcing_analysis.verdict.toLowerCase()}`}>
+                      <div className="sourcing-banner">
+                        <div className="flex items-center gap-2">
+                          <span className={`sourcing-verdict-badge badge-${result.sourcing_analysis.verdict.toLowerCase()}`}>
+                            {result.sourcing_analysis.verdict === "FONCE" ? <Flame className="size-4 fill-current" /> : result.sourcing_analysis.verdict === "NEGOCIE" ? <TrendingUp className="size-4" /> : <ShieldAlert className="size-4" />}
+                            {result.sourcing_analysis.badge}
+                          </span>
+                          <strong className="text-xs text-white">{result.sourcing_analysis.titre}</strong>
+                        </div>
+                        <span className="text-[10px] text-zinc-400 font-mono">
+                          Délai estimé : <b className="text-white">{result.sourcing_analysis.delai_vente_estime}</b>
+                        </span>
+                      </div>
+
+                      {/* Avis Sincère Quote */}
+                      <div className={`sourcing-sincere-quote quote-${result.sourcing_analysis.verdict.toLowerCase()}`}>
+                        <b className="block text-[9px] uppercase tracking-wider text-zinc-400 mb-1">Avis Sincère de l&apos;IA :</b>
+                        {result.sourcing_analysis.avis_sincere}
+                      </div>
+
+                      {/* Financial Simulation Grid */}
+                      <div>
+                        <span className="text-[8px] tracking-wider text-zinc-400 uppercase font-mono font-semibold block mb-1.5">Simulation Financière de l&apos;Achat</span>
+                        <div className="sourcing-finances-grid">
+                          <div className="sourcing-finance-tile">
+                            <span>Prix Vendeur</span>
+                            <strong>{euro(result.sourcing_analysis.prix_affiche_vendeur)}</strong>
+                            <small>affiché sur l&apos;annonce</small>
+                          </div>
+                          <div className="sourcing-finance-tile">
+                            <span>Coût Total Réel</span>
+                            <strong className="text-zinc-300">{euro(result.sourcing_analysis.cout_total_achat)}</strong>
+                            <small>port & protection acheteur</small>
+                          </div>
+                          <div className="sourcing-finance-tile">
+                            <span>Revente Vinted</span>
+                            <strong className="text-blue-400">{euro(result.sourcing_analysis.prix_revente_rapide)}</strong>
+                            <small>cote de liquidation &lt; 7j</small>
+                          </div>
+                          <div className="sourcing-finance-tile">
+                            <span>Bénéfice Net</span>
+                            <strong className={result.sourcing_analysis.benefice_net_estime > 0 ? "text-emerald-400" : "text-red-400"}>
+                              {euro(result.sourcing_analysis.benefice_net_estime)}
+                            </strong>
+                            <small>ROI net ~{result.sourcing_analysis.roi_estime_pourcent}%</small>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Negotiation Offer Box */}
+                      {result.sourcing_analysis.message_offre && (
+                        <div className="negotiation-offer-card">
+                          <div className="negotiation-offer-header">
+                            <strong>
+                              <Wallet className="size-3.5 text-blue-400" />
+                              Offre Conseillée : {euro(result.sourcing_analysis.offre_suggeree)}
+                            </strong>
+                            <CopyButton
+                              text={result.sourcing_analysis.message_offre}
+                              field="sourcing_offre"
+                              copied={copied}
+                              onCopy={copyText}
+                              label="Copier message d'offre"
+                            />
+                          </div>
+                          <div className="negotiation-message-preview">
+                            &ldquo;{result.sourcing_analysis.message_offre}&rdquo;
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Points Forts & Points de Vigilance */}
+                      {(result.sourcing_analysis.points_forts.length > 0 || result.sourcing_analysis.points_vigilance.length > 0) && (
+                        <div className="sourcing-points-grid">
+                          <div className="sourcing-points-col points-positive">
+                            <strong>Points Forts Revente</strong>
+                            <ul>
+                              {result.sourcing_analysis.points_forts.map((pt, i) => (
+                                <li key={i}>{pt}</li>
+                              ))}
+                            </ul>
+                          </div>
+                          <div className="sourcing-points-col points-vigilance">
+                            <strong>Points de Vigilance</strong>
+                            <ul>
+                              {result.sourcing_analysis.points_vigilance.map((pt, i) => (
+                                <li key={i}>{pt}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Real Market Reality & Sourcing Verdict Card */}
                   {result.market_verdict && (

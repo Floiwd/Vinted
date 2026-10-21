@@ -11,6 +11,7 @@ import {
   type UserAiConfig,
 } from "@/lib/ai-provider";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import type { SourcingAnalysis } from "@/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -34,7 +35,7 @@ type PipelineInput = {
   dataUrl?: string;
   photos?: PhotoInput[];
   prixAchat?: number | null;
-  mode?: "SEMAINE_ACHAT" | "WEEKEND_SHOOTING";
+  mode?: "SEMAINE_ACHAT" | "WEEKEND_SHOOTING" | "SOURCING_CAPTURE";
   aiConfig?: AiConfigInput;
 };
 
@@ -477,6 +478,22 @@ export async function POST(request: Request) {
 
   try {
     const runtimeAiConfig = mergeRuntimeAiConfig(auth.userAiConfig || null, input.aiConfig);
+    const isSourcingMode = input.mode === "SOURCING_CAPTURE";
+
+    const visionSystemPrompt = isSourcingMode
+      ? "Tu es un expert d'arbitrage et de sourcing pour revendeurs Vinted. L'utilisateur te fournit une ou plusieurs captures d'écran d'une annonce en ligne (Vinted, Leboncoin, Depop, etc.) qu'il envisage d'acheter pour revendre avec bénéfice.\n" +
+        "MISSION D'ARBITRAGE :\n" +
+        "1) Détecte le prix affiché par le vendeur sur la capture (en euros). Renseigne 'prix_affiche_vendeur_eur' avec le montant exact (ex: 15).\n" +
+        "2) Identifie précisément la marque, le modèle, la catégorie, la taille et l'état mentionné par le vendeur.\n" +
+        "3) Évalue la COTE RÉELLE DE REVENTE sur Vinted : quel est le prix auquel cette pièce partira en moins de 7 jours ('prix_vente_rapide_estime_eur') et quel est le prix médian du marché ('prix_marche_median_eur') ? Sois strict et réaliste, ne gonfle jamais la cote.\n" +
+        "4) Détecte les défauts ou usures visibles sur les photos du vendeur ou décrits dans l'annonce (renseigne 'defauts_observes').\n" +
+        "5) Donne 2 à 3 points forts (ex: marque très recherchée, coupe tendance, bon état) et 2 à 3 points de vigilance (ex: photos floues, contrefaçons fréquentes, usure masquée).\n" +
+        "Réponds en JSON strict avec les clés : marque, modele, categorie, taille, etat, defauts_observes (tableau), caracteristiques (tableau), authenticite (objet niveau et indices), prix_affiche_vendeur_eur (nombre ou null), prix_vente_rapide_estime_eur (nombre), prix_marche_median_eur (nombre), points_forts (tableau de chaînes), points_vigilance (tableau de chaînes), confiance (nombre 0-1)."
+      : "Tu es un expert d'inventaire textile et d'arbitrage de marché d'occasion sur Vinted. Analyse chaque photo sans jamais certifier une authenticité à partir d'images seules. Signale les indices observables et les incertitudes. RÈGLES CRUCIALES :\n1) Pour la taille, lis uniquement une étiquette lisible; ne la déduis jamais de la coupe. Si aucune taille lisible n'apparaît, renvoie exactement 'À renseigner manuellement'.\n2) Lis les mesures uniquement si un mètre ruban est visible et ses graduations sont lisibles; sinon renvoie mesures null.\n3) Repère TOUS les défauts, micro-défauts et traces d'usure observables (taches, accroc, bouloches, frottement col/bas de pantalon, délavage, coutures fatiguées). Renvoie un tableau 'defauts_observes' avec descriptions précises (ex: 'Légères bouloches sur les poches', ou 'Aucun défaut visible, tissu impeccable').\n4) Pour l'analyse de marché : estime la valeur réelle et réaliste de revente sur Vinted (prix_vente_rapide_estime_eur pour vendre sous 7 jours sans brader, et prix_marche_median_eur pour le prix médian moyen).\nRéponds en JSON strict avec les clés : marque, modele, categorie, taille, etat, defauts_observes (tableau), caracteristiques (tableau), mesures (objet ou null), authenticite (objet niveau parmi faible/moyen/élevé et indices tableau), prix_achat_cible_eur (nombre), prix_vente_rapide_estime_eur (nombre), prix_marche_median_eur (nombre), points_forts (tableau), points_vigilance (tableau), confiance (nombre 0-1).";
+
+    const visionUserPrompt = isSourcingMode
+      ? `Analyse cette capture d'écran d'annonce pour un arbitrage d'achat-revente. ${input.prixAchat != null ? `Prix d'achat renseigné: ${input.prixAchat} EUR.` : "Extrais le prix affiché par le vendeur sur la capture."}`
+      : `Analyse l'article sur ces ${photos.length} planches/photos. ${photos.map((photo) => photo.angle).join("; ")}. ${input.prixAchat == null ? "Estime aussi un prix d'achat cible prudent et les prix de marché réels Vinted." : `Prix d'achat réel payé: ${input.prixAchat} EUR.`}`;
 
     const visionResult = await executeAiPrompt({
       task: "vision",
@@ -484,12 +501,12 @@ export async function POST(request: Request) {
       messages: [
         {
           role: "system",
-          content: "Tu es un expert d'inventaire textile et d'arbitrage de marché d'occasion sur Vinted. Analyse chaque photo sans jamais certifier une authenticité à partir d'images seules. Signale les indices observables et les incertitudes. RÈGLES CRUCIALES :\n1) Pour la taille, lis uniquement une étiquette lisible; ne la déduis jamais de la coupe. Si aucune taille lisible n'apparaît, renvoie exactement 'À renseigner manuellement'.\n2) Lis les mesures uniquement si un mètre ruban est visible et ses graduations sont lisibles; sinon renvoie mesures null.\n3) Repère TOUS les défauts, micro-défauts et traces d'usure observables (taches, accroc, bouloches, frottement col/bas de pantalon, délavage, coutures fatiguées). Renvoie un tableau 'defauts_observes' avec descriptions précises (ex: 'Légères bouloches sur les poches', ou 'Aucun défaut visible, tissu impeccable').\n4) Pour l'analyse de marché : estime la valeur réelle et réaliste de revente sur Vinted (prix_vente_rapide_estime_eur pour vendre sous 7 jours sans brader, et prix_marche_median_eur pour le prix médian moyen).\nRéponds en JSON strict avec les clés : marque, modele, categorie, taille, etat, defauts_observes (tableau), caracteristiques (tableau), mesures (objet ou null), authenticite (objet niveau parmi faible/moyen/élevé et indices tableau), prix_achat_cible_eur (nombre), prix_vente_rapide_estime_eur (nombre), prix_marche_median_eur (nombre), confiance (nombre 0-1).",
+          content: visionSystemPrompt,
         },
         {
           role: "user",
           content: [
-            { type: "text" as const, text: `Analyse l'article sur ces ${photos.length} planches/photos. ${photos.map((photo) => photo.angle).join("; ")}. ${input.prixAchat == null ? "Estime aussi un prix d'achat cible prudent et les prix de marché réels Vinted." : `Prix d'achat réel payé: ${input.prixAchat} EUR.`}` },
+            { type: "text" as const, text: visionUserPrompt },
             ...photos.flatMap((photo) => [
               { type: "text" as const, text: `Angle: ${photo.angle}` },
               { type: "image_url" as const, image_url: { url: photo.dataUrl } },
@@ -512,14 +529,19 @@ export async function POST(request: Request) {
       caracteristiques?: string[];
       mesures?: Record<string, string | number> | null;
       authenticite?: { niveau?: string; indices?: string[] };
+      prix_affiche_vendeur_eur?: number;
       prix_achat_cible_eur?: number;
       prix_vente_rapide_estime_eur?: number;
       prix_marche_median_eur?: number;
+      points_forts?: string[];
+      points_vigilance?: string[];
       confiance?: number;
     }>(visionResult.text);
 
-    const purchasePrice = (input.prixAchat ?? Number(vision.prix_achat_cible_eur)) || 10;
-    const ctaTtc = Number((purchasePrice * 1.05 + 0.70 + 3.50).toFixed(2));
+    const detectedVendorPrice = Number(vision.prix_affiche_vendeur_eur) || Number(vision.prix_achat_cible_eur) || 12;
+    const purchasePrice = (input.prixAchat ?? detectedVendorPrice) || 12;
+    const estimatedFees = Number((2.90 + (purchasePrice * 0.05 + 0.70)).toFixed(2));
+    const ctaTtc = Number((purchasePrice + estimatedFees).toFixed(2));
     const targetX2 = Math.round(ctaTtc * 2);
 
     const item = {
@@ -590,13 +612,21 @@ export async function POST(request: Request) {
       conseil_rotation: `Affichez à ${displayedPrice} € avec marge de négociation. Acceptez toute offre à partir de ${marketFastSell} €. Ne descendez pas en dessous de ${floorPrice} €.`,
     };
 
+    const copySystemPrompt = isSourcingMode
+      ? "Tu es un arbitre expert en achat-revente Vinted. Tu rédiges un avis franc, direct et sans concession sur une annonce repérée en ligne, ainsi qu'un message d'offre pour le vendeur et l'annonce de revente future.\n" +
+        "Réponds en JSON strict avec les clés :\n" +
+        "- avis_sincere : analyse cash de l'article (attractivité sur Vinted, justesse du prix affiché, si c'est une pépite ou un piège).\n" +
+        "- message_offre : phrase de négociation courtoise et très efficace pour faire accepter l'offre proposée au vendeur Vinted sans le braquer.\n" +
+        "- titre_court, titre_seo, description, defauts_transparence, hashtags, message_nego (pour l'annonce de revente future)."
+      : "Tu es un rédacteur d'élite pour vendeurs Vinted. Tu rédiges des annonces percutantes, honnêtes, vendeuses et ultra-optimisées pour l'algorithme de recherche Vinted. Réponds en JSON strict avec les clés : titre_court, titre_seo, description, defauts_transparence, hashtags, message_nego.\nRÈGLES :\n1) titre_court : court, percutant et direct (ex: 'Jean Levi's 501 Bleu W32 L34').\n2) titre_seo : enrichi avec les mots-clés les plus cherchés sur Vinted (marque, coupe, matière, couleur, époque/style comme Vintage, Y2K, Streetwear, Oversize).\n3) description : annonce structurée premium en français : '📝 Titre', '📏 Détails & Taille', '✨ État & Authenticité', '🛡️ Transparence (mentionne clairement les défauts observés pour éviter tout litige acheteur)', '💡 Conseil look / Pourquoi l'acheter'.\n4) defauts_transparence : 1 à 2 phrases claires et rassurantes décrivant l'état réel pour sécuriser la transaction.\n5) hashtags : 10 à 15 hashtags #... ultra-ciblés, sans spam, correspondant exactement à la pièce.\n6) message_nego : phrase courtoise et ferme à envoyer à un acheteur qui fait une offre trop basse.";
+
     const copyResult = await executeAiPrompt({
       task: "copy",
       defaultModel: process.env.CLAUDE_MODEL || "auto/claude-sonnet",
       messages: [
         {
           role: "system",
-          content: "Tu es un rédacteur d'élite pour vendeurs Vinted. Tu rédiges des annonces percutantes, honnêtes, vendeuses et ultra-optimisées pour l'algorithme de recherche Vinted. Réponds en JSON strict avec les clés : titre_court, titre_seo, description, defauts_transparence, hashtags, message_nego.\nRÈGLES :\n1) titre_court : court, percutant et direct (ex: 'Jean Levi's 501 Bleu W32 L34').\n2) titre_seo : enrichi avec les mots-clés les plus cherchés sur Vinted (marque, coupe, matière, couleur, époque/style comme Vintage, Y2K, Streetwear, Oversize).\n3) description : annonce structurée premium en français : '📝 Titre', '📏 Détails & Taille', '✨ État & Authenticité', '🛡️ Transparence (mentionne clairement les défauts observés pour éviter tout litige acheteur)', '💡 Conseil look / Pourquoi l'acheter'.\n4) defauts_transparence : 1 à 2 phrases claires et rassurantes décrivant l'état réel pour sécuriser la transaction.\n5) hashtags : 10 à 15 hashtags #... ultra-ciblés, sans spam, correspondant exactement à la pièce.\n6) message_nego : phrase courtoise et ferme à envoyer à un acheteur qui fait une offre trop basse.",
+          content: copySystemPrompt,
         },
         {
           role: "user",
@@ -623,6 +653,8 @@ export async function POST(request: Request) {
       defauts_transparence?: string;
       hashtags?: string;
       message_nego?: string;
+      avis_sincere?: string;
+      message_offre?: string;
     }>(copyResult.text);
 
     const copy = sanitizeAdCopy(rawCopy);
@@ -637,6 +669,57 @@ export async function POST(request: Request) {
       prix_affiche: displayedPrice,
       prix_revente: marketFastSell,
     };
+
+    const netProfit = Math.round(marketFastSell - ctaTtc);
+    const estimatedRoi = Math.round((netProfit / Math.max(1, ctaTtc)) * 100);
+    const targetBuyForX2 = Math.max(1, Math.round((marketFastSell / 2) - estimatedFees));
+    const suggestedOffer = Math.min(purchasePrice, targetBuyForX2);
+
+    let sourcingVerdict: "FONCE" | "NEGOCIE" | "SKIP";
+    let sourcingBadge: string;
+    let sourcingTitle: string;
+    let saleDelay: string;
+
+    if (netProfit >= 16 && estimatedRoi >= 70) {
+      sourcingVerdict = "FONCE";
+      sourcingBadge = "🔥 FONCE ! (PÉPITE SOUS-COTÉE)";
+      sourcingTitle = "Opportunité en or — Revente rapide avec marge x2+";
+      saleDelay = "Vente très rapide (< 5 jours)";
+    } else if (netProfit >= 6 && estimatedRoi >= 25) {
+      sourcingVerdict = "NEGOCIE";
+      sourcingBadge = "🤝 NÉGOCIE (TROP CHER POUR X2 DIRECT)";
+      sourcingTitle = `Rentable avec une offre à ${suggestedOffer} €`;
+      saleDelay = "Vente normale (7 à 14 jours)";
+    } else {
+      sourcingVerdict = "SKIP";
+      sourcingBadge = "🛑 PASSE TON TOUR / TROP CHER";
+      sourcingTitle = "Achat déconseillé — Marge insuffisante ou risque de perte";
+      saleDelay = "Rotation lente / Risque de capital bloqué";
+    }
+
+    const sourcingAnalysis: SourcingAnalysis = {
+      verdict: sourcingVerdict,
+      badge: sourcingBadge,
+      titre: sourcingTitle,
+      avis_sincere: rawCopy.avis_sincere || (sourcingVerdict === "FONCE"
+        ? `Excellente affaire détectée. Le vendeur affiche ${purchasePrice} €, ce qui est nettement sous la cote réelle Vinted de ${marketFastSell} €. Revente rapide garantie.`
+        : sourcingVerdict === "NEGOCIE"
+        ? `Le prix vendeur de ${purchasePrice} € est un peu trop élevé pour viser un x2 net après frais (${ctaTtc} € engagés). Proposez une offre ferme à ${suggestedOffer} € pour sécuriser votre marge.`
+        : `Annonce à éviter. Le vendeur vend ${purchasePrice} €, mais la cote réelle Vinted ne dépasse pas ${marketFastSell} €. Après frais de port et protection, le bénéfice est quasi nul (${netProfit} €) pour un risque élevé d'invendu.`),
+      prix_affiche_vendeur: purchasePrice,
+      frais_estimes: estimatedFees,
+      cout_total_achat: ctaTtc,
+      prix_revente_rapide: marketFastSell,
+      prix_revente_optimiste: marketMedian,
+      benefice_net_estime: netProfit,
+      roi_estime_pourcent: estimatedRoi,
+      delai_vente_estime: saleDelay,
+      offre_suggeree: suggestedOffer,
+      message_offre: rawCopy.message_offre || `Bonjour ! Votre article m'intéresse beaucoup. Seriez-vous d'accord pour ${suggestedOffer} € ? Je prends immédiatement si c'est bon pour vous ! Merci à vous 😊`,
+      points_forts: Array.isArray(vision.points_forts) && vision.points_forts.length ? vision.points_forts : ["Marque recherchée sur Vinted", "Bonne visibilité algorithmique"],
+      points_vigilance: Array.isArray(vision.points_vigilance) && vision.points_vigilance.length ? vision.points_vigilance : ["Vérifier l'état et l'authenticité à réception"],
+    };
+
     const data = {
       SKU_ID: skuId,
       sku_id: skuId,
@@ -656,6 +739,7 @@ export async function POST(request: Request) {
       description: description || "Vêtement en bon état, à découvrir et à essayer.",
       market,
       market_verdict: marketVerdict,
+      sourcing_analysis: isSourcingMode ? sourcingAnalysis : undefined,
       defauts_transparence: rawCopy.defauts_transparence || "Article en bon état général conforme aux photos.",
       hashtags: copy.hashtags || "#secondemain #mode #vintage #look #streetwear #style #pull #boutique",
       message_nego: input.mode === "WEEKEND_SHOOTING" ? "" : copy.message_nego || "",
