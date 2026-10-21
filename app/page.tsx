@@ -12,9 +12,9 @@ import type { AiProviderType, AiStatusSummary } from "@/lib/ai-provider";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ArrowDownToLine, ArrowRight, BadgeCheck, Barcode, Box, CalendarDays, Check, CheckCircle2, Clipboard, Clock3,
-  Copy, ExternalLink, FileText, Flame, ImagePlus, LockKeyhole, LogOut, Mail, MailCheck, MapPin,
-  PackageCheck, Plus, Printer, RefreshCw, ScanLine, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Tag,
-  TrendingUp, Upload, Wallet, X, Zap,
+  Command, Copy, ExternalLink, Eye, FileText, Flame, ImagePlus, LockKeyhole, LogOut, Mail, MailCheck, MapPin,
+  MessageSquare, PackageCheck, Plus, Printer, RefreshCw, RotateCcw, ScanLine, Search, Send, ShieldAlert,
+  ShieldCheck, Sliders, Sparkles, Sun, Tag, TrendingUp, Upload, Wallet, Wand2, Wifi, WifiOff, X, Zap,
 } from "lucide-react";
 
 const AI_PROVIDERS: Record<AiProviderType, { label: string; desc: string; keyUrl?: string; placeholder?: string }> = {
@@ -530,8 +530,47 @@ export default function VintedDashboard() {
   const [activeShippingIndex, setActiveShippingIndex] = useState(0);
   const [shippingError, setShippingError] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [cmdQuery, setCmdQuery] = useState("");
+  const [buyerReplyType, setBuyerReplyType] = useState<"nego" | "dispo" | "dernier_prix" | "envoi">("nego");
+  const originalPhotosRef = useRef<Map<string, string>>(new Map());
   const syncQueue = useRef<Promise<void>>(Promise.resolve());
   const supabaseRef = useRef<SupabaseClient | null>(null);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCmdOpen((prev) => !prev);
+      } else if (e.key === "Escape") {
+        setCmdOpen(false);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setIsOnline(navigator.onLine);
+    function handleOnline() {
+      setIsOnline(true);
+      toast.success("Connexion rétablie ! Mode Cloud synchronisé.");
+    }
+    function handleOffline() {
+      setIsOnline(false);
+      toast.warning("Mode Hors-ligne (Vidé-grenier) actif. Données stockées localement.", {
+        description: "Vous pouvez continuer à travailler, le stock se synchronisera dès le retour du réseau.",
+      });
+    }
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   async function apiFetch(input: RequestInfo | URL, init?: RequestInit) {
     const client = supabaseRef.current;
@@ -1019,6 +1058,360 @@ export default function VintedDashboard() {
     }
   }
 
+  async function autoDetectLabelCrop(imageUrl: string): Promise<{
+    cropArea: { x: number; y: number; width: number; height: number };
+    crop: { x: number; y: number };
+    zoom: number;
+  }> {
+    return new Promise((resolve) => {
+      const img = new window.Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        const canvas = document.createElement("canvas");
+        const scale = Math.min(1, 800 / Math.max(w, h));
+        const sw = Math.floor(w * scale);
+        const sh = Math.floor(h * scale);
+        canvas.width = sw;
+        canvas.height = sh;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) {
+          const cropW = Math.floor(w * 0.88);
+          const cropH = Math.floor(cropW * 1.5);
+          resolve({
+            cropArea: { x: Math.floor(w * 0.06), y: Math.floor(h * 0.03), width: cropW, height: Math.min(h, cropH) },
+            crop: { x: 0, y: 140 },
+            zoom: 1.25,
+          });
+          return;
+        }
+        ctx.drawImage(img, 0, 0, sw, sh);
+        const imgData = ctx.getImageData(0, 0, sw, sh);
+        const data = imgData.data;
+
+        // Un bordereau de transport sur un A4 se trouve dans les 72% supérieurs
+        const maxScanY = Math.floor(sh * 0.72);
+        let minX = sw, maxX = 0, minY = sh, maxY = 0;
+        let darkCount = 0;
+
+        for (let y = Math.floor(sh * 0.02); y < maxScanY; y += 2) {
+          for (let x = Math.floor(sw * 0.02); x < sw - Math.floor(sw * 0.02); x += 2) {
+            const idx = (y * sw + x) * 4;
+            const r = data[idx];
+            const g = data[idx + 1];
+            const b = data[idx + 2];
+            if (r < 160 && g < 160 && b < 160) {
+              darkCount++;
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+
+        if (darkCount > 80 && maxX > minX && maxY > minY) {
+          let realMinX = Math.floor(minX / scale);
+          let realMaxX = Math.floor(maxX / scale);
+          let realMinY = Math.floor(minY / scale);
+          let realMaxY = Math.floor(maxY / scale);
+
+          const padX = Math.floor(w * 0.025);
+          const padY = Math.floor(h * 0.02);
+          realMinX = Math.max(0, realMinX - padX);
+          realMaxX = Math.min(w, realMaxX + padX);
+          realMinY = Math.max(0, realMinY - padY);
+          realMaxY = Math.min(h, realMaxY + padY);
+
+          let boxW = realMaxX - realMinX;
+          let boxH = realMaxY - realMinY;
+
+          const targetAspect = 2 / 3;
+          const currentAspect = boxW / boxH;
+
+          if (currentAspect > targetAspect) {
+            boxH = Math.floor(boxW / targetAspect);
+            if (realMinY + boxH > h) {
+              realMinY = Math.max(0, h - boxH);
+            }
+          } else {
+            boxW = Math.floor(boxH * targetAspect);
+            if (realMinX + boxW > w) {
+              realMinX = Math.max(0, w - boxW);
+            }
+          }
+
+          const cropW = Math.min(w - realMinX, boxW);
+          const cropH = Math.min(h - realMinY, boxH);
+          resolve({
+            cropArea: { x: realMinX, y: realMinY, width: cropW, height: cropH },
+            crop: { x: 0, y: Math.round((h / 2 - (realMinY + cropH / 2)) * 0.38) },
+            zoom: Math.max(1, Math.min(2.4, w / cropW)),
+          });
+        } else {
+          const targetW = Math.floor(w * 0.88);
+          const targetH = Math.floor(targetW * 1.5);
+          resolve({
+            cropArea: { x: Math.floor(w * 0.06), y: Math.floor(h * 0.03), width: targetW, height: Math.min(h, targetH) },
+            crop: { x: 0, y: 140 },
+            zoom: 1.25,
+          });
+        }
+      };
+      img.onerror = () => {
+        resolve({
+          cropArea: { x: 0, y: 0, width: 800, height: 1200 },
+          crop: { x: 0, y: 0 },
+          zoom: 1,
+        });
+      };
+      img.src = imageUrl;
+    });
+  }
+
+  function applyCarrierPreset(carrier: "auto" | "mondial" | "chronopost" | "colissimo" | "full") {
+    const active = shippingLabels[activeShippingIndex];
+    if (!active) return;
+    const img = new window.Image();
+    img.onload = () => {
+      const w = img.naturalWidth || img.width;
+      const h = img.naturalHeight || img.height;
+      let newCropArea = { x: 0, y: 0, width: w, height: h };
+      let newCrop = { x: 0, y: 0 };
+      let newZoom = 1;
+
+      if (carrier === "mondial") {
+        const cropW = Math.floor(w * 0.86);
+        const cropH = Math.floor(cropW * 1.5);
+        newCropArea = { x: Math.floor(w * 0.05), y: Math.floor(h * 0.02), width: cropW, height: Math.min(h, cropH) };
+        newCrop = { x: 0, y: 150 };
+        newZoom = 1.28;
+      } else if (carrier === "chronopost") {
+        const cropW = Math.floor(w * 0.90);
+        const cropH = Math.floor(cropW * 1.5);
+        newCropArea = { x: Math.floor(w * 0.05), y: Math.floor(h * 0.04), width: cropW, height: Math.min(h, cropH) };
+        newCrop = { x: 0, y: 130 };
+        newZoom = 1.22;
+      } else if (carrier === "colissimo") {
+        const cropW = Math.floor(w * 0.92);
+        const cropH = Math.floor(cropW * 1.5);
+        newCropArea = { x: Math.floor(w * 0.04), y: Math.floor(h * 0.03), width: cropW, height: Math.min(h, cropH) };
+        newCrop = { x: 0, y: 120 };
+        newZoom = 1.2;
+      } else if (carrier === "auto") {
+        void autoDetectLabelCrop(active.image).then((res) => {
+          updateShippingLabel(active.id, { cropArea: res.cropArea, crop: res.crop, zoom: res.zoom });
+          toast.success("Auto-recadrage intelligent appliqué !");
+        });
+        return;
+      } else {
+        const cropH = Math.min(h, Math.floor(w * 1.5));
+        newCropArea = { x: 0, y: 0, width: w, height: cropH };
+        newCrop = { x: 0, y: 0 };
+        newZoom = 1;
+      }
+
+      updateShippingLabel(active.id, { cropArea: newCropArea, crop: newCrop, zoom: newZoom });
+      toast.success(`Preset ${carrier.toUpperCase()} appliqué !`);
+    };
+    img.src = active.image;
+  }
+
+  async function printShippingLabelsThermal() {
+    if (!shippingLabels.length) {
+      setShippingError("Ajoute au moins un bordereau.");
+      return;
+    }
+    const uncroppedIndex = shippingLabels.findIndex((label) => !label.cropArea);
+    if (uncroppedIndex >= 0) {
+      setActiveShippingIndex(uncroppedIndex);
+      setShippingError(`Cadre le bordereau ${uncroppedIndex + 1} avant l'impression.`);
+      return;
+    }
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      toast.error("Veuillez autoriser les fenêtres pop-up pour l'impression directe.");
+      return;
+    }
+
+    const imagesHtml: string[] = [];
+    for (const label of shippingLabels) {
+      const img = new window.Image();
+      img.src = label.image;
+      await img.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = 1000;
+      canvas.height = 1500;
+      const ctx = canvas.getContext("2d");
+      if (!ctx || !label.cropArea) continue;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, 1000, 1500);
+      ctx.drawImage(img, label.cropArea.x, label.cropArea.y, label.cropArea.width, label.cropArea.height, 0, 0, 1000, 1500);
+      const dataUrl = canvas.toDataURL("image/png");
+      imagesHtml.push(`<div class="label-page"><img src="${dataUrl}" alt="Bordereau ${label.name}" /></div>`);
+    }
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Impression Thermique 100x150 - Vinted COO</title>
+          <style>
+            @page {
+              size: 100mm 150mm;
+              margin: 0;
+            }
+            html, body {
+              margin: 0;
+              padding: 0;
+              background: #fff;
+              width: 100mm;
+            }
+            .label-page {
+              width: 100mm;
+              height: 150mm;
+              page-break-after: always;
+              page-break-inside: avoid;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              overflow: hidden;
+            }
+            .label-page img {
+              width: 100mm;
+              height: 150mm;
+              object-fit: contain;
+            }
+          </style>
+        </head>
+        <body>
+          ${imagesHtml.join("")}
+          <script>
+            window.onload = function() {
+              window.focus();
+              setTimeout(function() {
+                window.print();
+                window.close();
+              }, 350);
+            };
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    toast.success("Impression thermique directe lancée !");
+  }
+
+  async function processPhotoCanvas(dataUrl: string, type: "boost" | "shadows" | "contrast"): Promise<string> {
+    return new Promise((resolve) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return resolve(dataUrl);
+        ctx.drawImage(img, 0, 0);
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imgData.data;
+
+        for (let i = 0; i < d.length; i += 4) {
+          let r = d[i];
+          let g = d[i + 1];
+          let b = d[i + 2];
+
+          if (type === "boost") {
+            r = Math.min(255, Math.pow(r / 255, 0.9) * 255 * 1.05);
+            g = Math.min(255, Math.pow(g / 255, 0.9) * 255 * 1.05);
+            b = Math.min(255, Math.pow(b / 255, 0.9) * 255 * 1.05);
+          } else if (type === "shadows") {
+            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            if (lum < 150) {
+              const boost = ((150 - lum) / 150) * 45;
+              r = Math.min(255, r + boost);
+              g = Math.min(255, g + boost);
+              b = Math.min(255, b + boost);
+            }
+          } else if (type === "contrast") {
+            const factor = (259 * (35 + 255)) / (255 * (259 - 35));
+            r = Math.min(255, Math.max(0, factor * (r - 128) + 128));
+            g = Math.min(255, Math.max(0, factor * (g - 128) + 128));
+            b = Math.min(255, Math.max(0, factor * (g - 128) + 128));
+          }
+
+          d[i] = r;
+          d[i + 1] = g;
+          d[i + 2] = b;
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+        resolve(canvas.toDataURL("image/jpeg", 0.92));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  async function applyStudioFilter(filterType: "boost" | "shadows" | "contrast" | "reset") {
+    if (photos.length === 0) return;
+
+    if (filterType === "reset") {
+      setPhotos((current) =>
+        current.map((photo) => {
+          const orig = originalPhotosRef.current.get(photo.name);
+          return orig ? { ...photo, dataUrl: orig } : photo;
+        })
+      );
+      toast.success("Photos réinitialisées à l'original");
+      return;
+    }
+
+    for (const p of photos) {
+      if (!originalPhotosRef.current.has(p.name)) {
+        originalPhotosRef.current.set(p.name, p.dataUrl);
+      }
+    }
+
+    toast.info("Traitement Studio Photo en cours...");
+    const processed = await Promise.all(
+      photos.map(async (p) => {
+        const orig = originalPhotosRef.current.get(p.name) || p.dataUrl;
+        const filtered = await processPhotoCanvas(orig, filterType);
+        return { ...p, dataUrl: filtered };
+      })
+    );
+
+    setPhotos(processed);
+    const labels = {
+      boost: "Studio Boost (Lumière & Clarté)",
+      shadows: "Débouchage des ombres",
+      contrast: "Contraste dynamique",
+    };
+    toast.success(`Filtre ${labels[filterType]} appliqué sur ${photos.length} photo(s) !`);
+  }
+
+  function getBuyerResponseText(type: "nego" | "dispo" | "dernier_prix" | "envoi", item: Listing | null): string {
+    if (!item) return "";
+    const marque = item.marque || "la pièce";
+    const modele = item.modele ? ` ${item.modele}` : "";
+    const prixAffiche = item.market_verdict?.prix_affiche_recommande ?? item.prix_revente ?? item.prix_affiche;
+    const prixPlancher = item.market_verdict?.prix_plancher ?? Math.max(1, Math.round(prixAffiche * 0.85));
+    const contreOffre = item.market_verdict?.contre_offre ?? Math.max(1, Math.round(prixAffiche * 0.92));
+
+    switch (type) {
+      case "nego":
+        return `Bonjour, merci pour votre proposition ! Compte tenu de l'état impeccable et de la rareté de ce modèle ${marque}${modele}, je ne peux pas descendre à ce montant. Je peux en revanche faire un geste et vous le laisser à ${contreOffre} € (offre valable 24h). Bonne journée !`;
+      case "dispo":
+        return `Bonjour ! Oui, la pièce est bien disponible et soigneusement emballée. Si vous finalisez la commande aujourd'hui, le colis sera déposé au point relais dès demain matin première heure !`;
+      case "dernier_prix":
+        return `Bonjour ! Le prix affiché de ${prixAffiche} € est déjà calculé au plus juste par rapport à la cote moyenne du marché pour une pièce authentique en cet état. Mon prix plancher ferme est de ${prixPlancher} €. Merci à vous et à disposition si besoin de mesures !`;
+      case "envoi":
+        return `Bonjour ! Oui expédition ultra-rapide garantie : je dépose tous mes colis sous 24h ouvrées maximum avec emballage soigné et suivi transporteur en temps réel !`;
+    }
+  }
+
   async function readShippingLabel(file: File): Promise<ShippingLabel> {
     if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} dépasse 20 Mo.`);
     let imageData: string;
@@ -1045,7 +1438,15 @@ export default function VintedDashboard() {
     } else {
       throw new Error(`Format non pris en charge : ${file.name}.`);
     }
-    return { id: crypto.randomUUID(), name: file.name, image: imageData, crop: { x: 0, y: 0 }, zoom: 1, cropArea: null };
+    const autoCrop = await autoDetectLabelCrop(imageData);
+    return {
+      id: crypto.randomUUID(),
+      name: file.name,
+      image: imageData,
+      crop: autoCrop.crop,
+      zoom: autoCrop.zoom,
+      cropArea: autoCrop.cropArea,
+    };
   }
 
   async function loadShippingLabels(files: File[]) {
@@ -1501,6 +1902,26 @@ export default function VintedDashboard() {
     <main className="dashboard-shell">
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Vinted COO accueil"><span className="brand-mark"><Zap className="size-4 fill-current" /></span><span>VINTED<span className="brand-muted"> / COO</span></span></a>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            className="cmd-k-trigger"
+            onClick={() => setCmdOpen(true)}
+            title="Rechercher un article ou action (Cmd + K)"
+          >
+            <Search className="size-3.5" />
+            <span>Recherche rapide...</span>
+            <kbd className="cmd-k-badge">⌘K</kbd>
+          </button>
+          <div
+            className={`network-pill ${isOnline ? "network-online" : "network-offline"}`}
+            title={isOnline ? "Connecté au Cloud Vinted COO" : "Mode Hors-ligne Vidé-grenier"}
+          >
+            {isOnline ? <Wifi className="size-3" /> : <WifiOff className="size-3" />}
+            <span className="status-dot-vibrant" />
+            <span>{isOnline ? "En ligne" : "Hors-ligne"}</span>
+          </div>
+        </div>
         <div className="topbar-center"><span className="live-dot" /> PIPELINE OPÉRATIONNEL <span className="topbar-divider">/</span> EUROPE · PARIS</div>
         <button className="icon-action lock-action" onClick={signOut} title="Se déconnecter" aria-label="Se déconnecter"><LogOut className="size-4" /><span>{signedInEmail || "Déconnexion"}</span></button>
       </header>
@@ -1612,6 +2033,51 @@ export default function VintedDashboard() {
                     <div className="photo-count">
                       <ImagePlus className="size-4" />
                       {photos.length} image{photos.length > 1 ? "s" : ""} sélectionnée{photos.length > 1 ? "s" : ""}
+                    </div>
+                    {/* Studio Photo Bar */}
+                    <div
+                      className="photo-studio-bar"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <span className="photo-studio-label">
+                        <Wand2 className="size-3.5" /> Studio Photo :
+                      </span>
+                      <button
+                        type="button"
+                        className="studio-btn"
+                        onClick={(e) => { e.preventDefault(); void applyStudioFilter("boost"); }}
+                        title="Améliorer la luminosité et la clarté globale pour le feed Vinted"
+                      >
+                        <Sun className="size-3 text-amber-300" />
+                        <span>Studio Boost</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-btn"
+                        onClick={(e) => { e.preventDefault(); void applyStudioFilter("shadows"); }}
+                        title="Éclaircir les zones d'ombres et vêtements sombres"
+                      >
+                        <Eye className="size-3 text-emerald-400" />
+                        <span>Déboucher ombres</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-btn"
+                        onClick={(e) => { e.preventDefault(); void applyStudioFilter("contrast"); }}
+                        title="Rehausser les contrastes et les textures"
+                      >
+                        <Sliders className="size-3 text-blue-400" />
+                        <span>Contraste Pro</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-btn"
+                        onClick={(e) => { e.preventDefault(); void applyStudioFilter("reset"); }}
+                        title="Revenir à la photo originale"
+                      >
+                        <RotateCcw className="size-3 text-zinc-400" />
+                        <span>Original</span>
+                      </button>
                     </div>
                     <div className="photo-grid">
                       {photos.map((photo, index) => (
@@ -2113,6 +2579,56 @@ export default function VintedDashboard() {
                     )}
                   </div>
 
+                  {/* Réponses Rapides Acheteurs */}
+                  <div className="buyer-replies-block">
+                    <div className="buyer-replies-heading">
+                      <span>
+                        <MessageSquare className="size-3.5 text-emerald-400" />
+                        Réponses Rapides Acheteurs
+                      </span>
+                      <CopyButton
+                        text={getBuyerResponseText(buyerReplyType, result)}
+                        field="buyer_reply"
+                        copied={copied}
+                        onCopy={copyText}
+                        label="Copier le message"
+                      />
+                    </div>
+                    <div className="buyer-tabs">
+                      <button
+                        type="button"
+                        className={`buyer-tab-btn ${buyerReplyType === "nego" ? "active" : ""}`}
+                        onClick={() => setBuyerReplyType("nego")}
+                      >
+                        📉 Offre abusive
+                      </button>
+                      <button
+                        type="button"
+                        className={`buyer-tab-btn ${buyerReplyType === "dispo" ? "active" : ""}`}
+                        onClick={() => setBuyerReplyType("dispo")}
+                      >
+                        ⚡ &quot;C&apos;est dispo ?&quot;
+                      </button>
+                      <button
+                        type="button"
+                        className={`buyer-tab-btn ${buyerReplyType === "dernier_prix" ? "active" : ""}`}
+                        onClick={() => setBuyerReplyType("dernier_prix")}
+                      >
+                        🏷️ &quot;Dernier prix ?&quot;
+                      </button>
+                      <button
+                        type="button"
+                        className={`buyer-tab-btn ${buyerReplyType === "envoi" ? "active" : ""}`}
+                        onClick={() => setBuyerReplyType("envoi")}
+                      >
+                        📦 &quot;Envoi rapide ?&quot;
+                      </button>
+                    </div>
+                    <div className="buyer-reply-box">
+                      <p>{getBuyerResponseText(buyerReplyType, result)}</p>
+                    </div>
+                  </div>
+
                   <div className="result-footer">
                     <span><CheckCircle2 className="size-3.5" /> SKU ajouté à l&apos;historique local</span>
                     <button onClick={() => { setView("stock"); setFilter("TOUT"); }} className="text-link">
@@ -2201,7 +2717,82 @@ export default function VintedDashboard() {
             <div className="panel shipping-panel">
               <div className="panel-heading"><div><span className="step-label">BORDEREAU D&apos;EXPÉDITION</span><h2>Préparer une étiquette 100 × 150</h2></div><span className="panel-heading-icon"><FileText className="size-4" /></span></div>
               <label className="upload-zone shipping-upload" htmlFor="shipping-label-file"><input id="shipping-label-file" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => { const files = Array.from(event.currentTarget.files || []); if (files.length) void loadShippingLabels(files); event.currentTarget.value = ""; }} /><span className="upload-icon"><Upload className="size-5" /></span><strong>Ajouter plusieurs bordereaux</strong><span>PDF, JPG, PNG ou WebP · 20 Mo maximum par fichier</span></label>
-              {activeShippingLabel && <><div className="shipping-batch-header"><span>Bordereau {activeShippingIndex + 1}/{shippingLabels.length} · {activeShippingLabel.name}</span><div><button className="icon-action" disabled={activeShippingIndex === 0} onClick={() => setActiveShippingIndex((index) => index - 1)} aria-label="Bordereau précédent"><ArrowRight className="size-4 rotate-180" /></button><button className="icon-action" disabled={activeShippingIndex >= shippingLabels.length - 1} onClick={() => setActiveShippingIndex((index) => index + 1)} aria-label="Bordereau suivant"><ArrowRight className="size-4" /></button><button className="icon-action" onClick={() => { const next = shippingLabels.filter((label) => label.id !== activeShippingLabel.id); setShippingLabels(next); setActiveShippingIndex(Math.max(0, Math.min(activeShippingIndex, next.length - 1))); }} aria-label="Retirer ce bordereau"><X className="size-4" /></button></div></div><div className="shipping-cropper"><Cropper image={activeShippingLabel.image} crop={activeShippingLabel.crop} zoom={activeShippingLabel.zoom} aspect={2 / 3} onCropChange={(crop) => updateShippingLabel(activeShippingLabel.id, { crop })} onZoomChange={(zoom) => updateShippingLabel(activeShippingLabel.id, { zoom })} onCropComplete={(_, pixels) => updateShippingLabel(activeShippingLabel.id, { cropArea: pixels })} /></div><label className="zoom-control"><span>Ajuster le cadrage</span><input type="range" min="1" max="4" step="0.05" value={activeShippingLabel.zoom} onChange={(event) => updateShippingLabel(activeShippingLabel.id, { zoom: Number(event.target.value) })} /></label><div className="shipping-actions"><span>{shippingLabels.length} page{shippingLabels.length > 1 ? "s" : ""} · 100 × 150 mm chacune</span><button className="primary-button" onClick={() => void exportShippingLabels()}><ArrowDownToLine className="size-4" /> Exporter {shippingLabels.length} bordereau{shippingLabels.length > 1 ? "x" : ""}</button></div></>}
+              {activeShippingLabel && (
+                <>
+                  <div className="shipping-batch-header">
+                    <span>Bordereau {activeShippingIndex + 1}/{shippingLabels.length} · {activeShippingLabel.name}</span>
+                    <div>
+                      <button className="icon-action" disabled={activeShippingIndex === 0} onClick={() => setActiveShippingIndex((index) => index - 1)} aria-label="Bordereau précédent">
+                        <ArrowRight className="size-4 rotate-180" />
+                      </button>
+                      <button className="icon-action" disabled={activeShippingIndex >= shippingLabels.length - 1} onClick={() => setActiveShippingIndex((index) => index + 1)} aria-label="Bordereau suivant">
+                        <ArrowRight className="size-4" />
+                      </button>
+                      <button className="icon-action" onClick={() => { const next = shippingLabels.filter((label) => label.id !== activeShippingLabel.id); setShippingLabels(next); setActiveShippingIndex(Math.max(0, Math.min(activeShippingIndex, next.length - 1))); }} aria-label="Retirer ce bordereau">
+                        <X className="size-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Auto-Crop Presets Bar */}
+                  <div className="shipping-presets-bar">
+                    <span className="text-[10px] font-semibold text-emerald-400 flex items-center gap-1.5">
+                      <Sparkles className="size-3.5" /> Auto-Crop Transporteur :
+                    </span>
+                    <div className="carrier-presets-list">
+                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("auto")} title="Détecter automatiquement l'étiquette">
+                        🎯 Auto-Détecter
+                      </button>
+                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("mondial")} title="Format Mondial Relay standard A4">
+                        📦 Mondial Relay
+                      </button>
+                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("chronopost")} title="Format Chronopost / Shop2Shop">
+                        ⚡ Chronopost
+                      </button>
+                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("colissimo")} title="Format Colissimo / La Poste">
+                        📮 Colissimo
+                      </button>
+                      <button type="button" className="carrier-pill" onClick={() => applyCarrierPreset("full")} title="Format brut complet">
+                        📐 Plein format
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="shipping-cropper">
+                    <Cropper
+                      image={activeShippingLabel.image}
+                      crop={activeShippingLabel.crop}
+                      zoom={activeShippingLabel.zoom}
+                      aspect={2 / 3}
+                      onCropChange={(crop) => updateShippingLabel(activeShippingLabel.id, { crop })}
+                      onZoomChange={(zoom) => updateShippingLabel(activeShippingLabel.id, { zoom })}
+                      onCropComplete={(_, pixels) => updateShippingLabel(activeShippingLabel.id, { cropArea: pixels })}
+                    />
+                  </div>
+                  <label className="zoom-control">
+                    <span>Ajuster le cadrage manuel</span>
+                    <input
+                      type="range"
+                      min="1"
+                      max="4"
+                      step="0.05"
+                      value={activeShippingLabel.zoom}
+                      onChange={(event) => updateShippingLabel(activeShippingLabel.id, { zoom: Number(event.target.value) })}
+                    />
+                  </label>
+                  <div className="shipping-actions">
+                    <span>{shippingLabels.length} bordereau{shippingLabels.length > 1 ? "x" : ""} · A6 Thermique (100 × 150 mm)</span>
+                    <div className="flex items-center gap-2">
+                      <button className="primary-button" onClick={() => void printShippingLabelsThermal()} title="Imprimer directement sur imprimante thermique 100x150 mm">
+                        <Printer className="size-4" /> Imprimer en Thermique A6
+                      </button>
+                      <button className="secondary-button" onClick={() => void exportShippingLabels()} title="Télécharger le fichier PDF 100x150 mm">
+                        <ArrowDownToLine className="size-4" /> Exporter PDF
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
               {shippingError && <div className="alert-error"><ShieldAlert className="size-4 shrink-0" />{shippingError}</div>}
               <p className="privacy-note"><ShieldCheck className="size-3.5" /> Chaque bordereau cadré devient une page distincte. Pour un PDF source, sa première page est utilisée.</p>
             </div>
@@ -2209,6 +2800,199 @@ export default function VintedDashboard() {
         )}
 
         {scannerOpen && <div className="modal-backdrop" role="presentation"><section className="scanner-modal" role="dialog" aria-modal="true" aria-labelledby="scanner-title"><div className="panel-heading"><div><span className="step-label">RECHERCHE DANS LE STOCK</span><h2 id="scanner-title">Scanner un SKU</h2></div><button className="icon-action" onClick={() => setScannerOpen(false)} aria-label="Fermer le scanner"><X className="size-4" /></button></div><QrScanner onScan={handleQrScan} /></section></div>}
+
+        {/* Command Palette Universelle (Cmd + K) */}
+        {cmdOpen && (
+          <div
+            className="cmd-k-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setCmdOpen(false);
+            }}
+          >
+            <div className="cmd-k-modal" role="dialog" aria-modal="true" aria-label="Palette de commandes">
+              <div className="cmd-k-header">
+                <Search className="size-4 text-emerald-400 shrink-0" />
+                <input
+                  type="text"
+                  className="cmd-k-input"
+                  placeholder="Rechercher un SKU, marque, modèle, action... (Échap pour fermer)"
+                  value={cmdQuery}
+                  onChange={(e) => setCmdQuery(e.target.value)}
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="icon-action text-zinc-400"
+                  onClick={() => setCmdOpen(false)}
+                  aria-label="Fermer"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+
+              <div className="cmd-k-results">
+                {/* Navigation */}
+                <div className="cmd-k-group-title">Navigation & Vues</div>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setView("pipeline"); setMode("SEMAINE_ACHAT"); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <Zap className="size-3.5 text-emerald-400 shrink-0" />
+                    <span>Mode Semaine Achat (Saisie & estimation rapide)</span>
+                  </div>
+                  <span className="cmd-k-item-meta">Vue Achat</span>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setView("pipeline"); setMode("WEEKEND_SHOOTING"); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <ImagePlus className="size-3.5 text-emerald-400 shrink-0" />
+                    <span>Mode Weekend Shooting (Photos 12 angles & checklist)</span>
+                  </div>
+                  <span className="cmd-k-item-meta">Vue Shooting</span>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setView("pipeline"); setMode("SOURCING_CAPTURE"); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <Search className="size-3.5 text-amber-400 shrink-0" />
+                    <span>Mode Arbitrage Sourcing (Capture d&apos;écran d&apos;annonce)</span>
+                  </div>
+                  <span className="cmd-k-item-meta">Vue Sourcing</span>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setView("stock"); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <Box className="size-3.5 text-blue-400 shrink-0" />
+                    <span>Inventaire du stock ({history.length} article{history.length > 1 ? "s" : ""})</span>
+                  </div>
+                  <span className="cmd-k-item-meta">Vue Stock</span>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setView("labels"); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <Printer className="size-3.5 text-purple-400 shrink-0" />
+                    <span>Étiquettes QR & Bordereaux d&apos;envoi 100×150</span>
+                  </div>
+                  <span className="cmd-k-item-meta">Vue Expédition</span>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setView("analytics"); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <TrendingUp className="size-3.5 text-emerald-400 shrink-0" />
+                    <span>Statistiques & Marges financières</span>
+                  </div>
+                  <span className="cmd-k-item-meta">Vue Analytics</span>
+                </button>
+
+                {/* Actions Rapides */}
+                <div className="cmd-k-group-title">Actions Rapides</div>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setScannerOpen(true); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <ScanLine className="size-3.5 text-emerald-400 shrink-0" />
+                    <span>Scanner un QR Code SKU (Caméra)</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { exportCsv(); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <ArrowDownToLine className="size-3.5 text-blue-400 shrink-0" />
+                    <span>Exporter l&apos;inventaire en fichier CSV</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="cmd-k-item"
+                  onClick={() => { setAiModalOpen(true); setCmdOpen(false); }}
+                >
+                  <div className="cmd-k-item-left">
+                    <Sparkles className="size-3.5 text-amber-400 shrink-0" />
+                    <span>Configurer le moteur IA Cloud</span>
+                  </div>
+                </button>
+
+                {/* Articles du stock filtrés */}
+                {history.length > 0 && (
+                  <>
+                    <div className="cmd-k-group-title">
+                      Articles du Stock {cmdQuery ? `(résultats pour "${cmdQuery}")` : ""}
+                    </div>
+                    {history
+                      .filter((item) => {
+                        if (!cmdQuery.trim()) return true;
+                        const q = cmdQuery.toLowerCase();
+                        return (
+                          item.sku_id.toLowerCase().includes(q) ||
+                          item.marque.toLowerCase().includes(q) ||
+                          item.modele.toLowerCase().includes(q) ||
+                          item.taille.toLowerCase().includes(q) ||
+                          item.statut.toLowerCase().includes(q)
+                        );
+                      })
+                      .slice(0, 8)
+                      .map((item) => (
+                        <button
+                          key={item.sku_id}
+                          type="button"
+                          className="cmd-k-item"
+                          onClick={() => {
+                            setResult(item);
+                            setView("pipeline");
+                            setCmdOpen(false);
+                            toast.success(`Article ${item.sku_id} ouvert`);
+                          }}
+                        >
+                          <div className="cmd-k-item-left">
+                            <Tag className="size-3.5 text-zinc-400 shrink-0" />
+                            <div className="flex flex-col text-left">
+                              <span className="font-semibold text-zinc-200">
+                                {item.sku_id} · {item.marque} {item.modele}
+                              </span>
+                              <span className="text-[10px] text-zinc-400">
+                                Taille : {item.taille || "N/A"} · {item.statut}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="cmd-k-item-meta">
+                            <strong className="text-emerald-400 font-mono text-xs">
+                              {euro(item.market_verdict?.prix_affiche_recommande ?? item.prix_revente ?? item.prix_affiche)}
+                            </strong>
+                          </div>
+                        </button>
+                      ))}
+                  </>
+                )}
+              </div>
+
+              <div className="cmd-k-footer">
+                <span>Astuce : Naviguez avec les flèches ou la souris · Clic pour ouvrir</span>
+                <span className="font-mono">Échap pour fermer</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {aiModalOpen && (
           <div className="modal-backdrop" role="presentation">

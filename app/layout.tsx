@@ -63,6 +63,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
                     e.preventDefault();
                   }
                 }, true);
+
+                if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
+                  window.addEventListener('load', function() {
+                    navigator.serviceWorker.register('/sw.js').catch(function() {});
+                  });
+                }
               }
             `,
           }}
