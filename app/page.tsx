@@ -5,6 +5,7 @@ import Image from "next/image";
 import Cropper from "react-easy-crop";
 import type { Html5Qrcode as Html5QrcodeInstance } from "html5-qrcode";
 import { QRCodeSVG } from "qrcode.react";
+import { toast } from "sonner";
 import "react-easy-crop/react-easy-crop.css";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { AiProviderType, AiStatusSummary } from "@/lib/ai-provider";
@@ -742,8 +743,10 @@ export default function VintedDashboard() {
       if (payload.aiStatus) applyAiStatus(payload.aiStatus);
       if (clearKey) setAiApiKey("");
       setAiFeedback({ type: "success", text: "Configuration IA enregistrée avec succès sur votre compte !" });
+      toast.success("Configuration IA enregistrée !");
     } catch (err) {
       setAiFeedback({ type: "error", text: err instanceof Error ? err.message : "Erreur de sauvegarde." });
+      toast.error(err instanceof Error ? err.message : "Erreur de sauvegarde IA");
     } finally {
       setAiPending(false);
     }
@@ -1161,10 +1164,21 @@ export default function VintedDashboard() {
       persist([payload.data, ...history.filter((entry) => entry.sku_id !== payload.data!.sku_id)]);
       if (payload.warning) setNotice(payload.warning);
       else setNotice(payload.data.sync_sheet ? "Article ajouté au stock et synchronisé avec Google Sheets." : "Article ajouté au stock local.");
+      if (mode === "SOURCING_CAPTURE") {
+        toast.success("Analyse d'achat terminée !", {
+          description: payload.data.marque ? `${payload.data.marque} ${payload.data.modele || ""} · Verdict prêt` : "Verdict d'arbitrage prêt",
+        });
+      } else {
+        toast.success("Fiche article générée !", {
+          description: `SKU ${payload.data.sku_id} enregistré dans l'inventaire`,
+        });
+      }
       window.setTimeout(() => setLoading(false), 700);
     } catch (pipelineError) {
       setProgress(0);
-      setError(pipelineError instanceof Error ? pipelineError.message : "Erreur de connexion au pipeline.");
+      const errorMsg = pipelineError instanceof Error ? pipelineError.message : "Erreur de connexion au pipeline.";
+      setError(errorMsg);
+      toast.error(errorMsg);
       setLoading(false);
     }
   }
@@ -1177,8 +1191,13 @@ export default function VintedDashboard() {
       }
       setCopied(field);
       window.setTimeout(() => setCopied(null), 1800);
+      toast.success("Copié !", {
+        description: text.length > 50 ? `${text.slice(0, 47)}...` : text,
+        duration: 1800,
+      });
     } catch {
       setError("Le presse-papiers est indisponible dans ce navigateur.");
+      toast.error("Presse-papiers indisponible dans ce navigateur");
     }
   }
 
@@ -1206,22 +1225,29 @@ export default function VintedDashboard() {
 
   function changeListingStatus(entry: Listing, status: Status) {
     if ((status === "PRET_A_PUBLIER" || status === "EN_LIGNE") && !isChecklistComplete(entry.checklist)) {
-      setError("Valide les cinq points de la checklist avant de marquer l'article comme prêt ou en ligne.");
+      const msg = "Valide les cinq points de la checklist avant de marquer l'article comme prêt ou en ligne.";
+      setError(msg);
+      toast.error(msg);
       return;
     }
     setError("");
     updateListing(entry.sku_id, { statut: status });
+    toast.success(`${entry.sku_id} · Statut mis à jour`, {
+      description: STATUS_LABELS[status],
+    });
   }
 
   function applyPriceSuggestion(entry: Listing) {
     const suggestedPrice = Math.max(1, Math.floor(entry.prix_revente * 0.95));
     updateListing(entry.sku_id, { prix_revente: suggestedPrice, prix_affiche: suggestedPrice });
     setNotice(`Prix de ${entry.sku_id} ajusté à ${euro(suggestedPrice)} (-5 %).`);
+    toast.info(`Prix ajusté à ${euro(suggestedPrice)} (-5 %)`);
   }
 
   function markRelisted(entry: Listing) {
     updateListing(entry.sku_id, { statut: "EN_LIGNE", date_publication: new Date().toISOString() });
     setNotice(`${entry.sku_id} marqué comme remis en ligne.`);
+    toast.success(`${entry.sku_id} remis en ligne !`);
   }
 
   function handleQrScan(value: string) {
@@ -1318,6 +1344,7 @@ export default function VintedDashboard() {
     if (result?.sku_id === sku) setResult(null);
     setEditingSku(null);
     setNotice("Article supprimé du stock.");
+    toast.success("Article supprimé du stock");
   }
 
   function exportCsv() {
@@ -1329,6 +1356,9 @@ export default function VintedDashboard() {
     link.download = "vinted-coo-stock.csv";
     link.click();
     URL.revokeObjectURL(url);
+    toast.success("Inventaire CSV exporté !", {
+      description: `${filteredHistory.length} article(s) inclus`,
+    });
   }
 
   const ctaPreview = prixAchat ? Number(prixAchat) * 1.05 + 4.2 : 0;

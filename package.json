@@ -23,7 +23,8 @@
     "qrcode.react": "^4.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "react-easy-crop": "^6.2.4"
+    "react-easy-crop": "^6.2.4",
+    "sonner": "^2.0.8"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
