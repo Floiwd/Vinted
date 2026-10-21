@@ -721,6 +721,48 @@ async function callOpenAiCompatible(
 
     if (!response.ok) {
       const providerMessage = payload?.error?.message || `${candidate.label} a répondu ${response.status}.`;
+
+      // Si limitation de débit temporaire (429 Rate Limit), pause et réessai automatique
+      if (response.status === 429) {
+        const match = providerMessage.match(/try again in ([0-9.]+)s/i);
+        const waitSec = match ? Math.min(8, Math.max(1, Math.ceil(parseFloat(match[1])))) : 3;
+        if (waitSec <= 8) {
+          await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
+          try {
+            const retryRes = await fetch(endpoint, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${candidate.apiKey}`,
+                "Content-Type": "application/json",
+                ...(candidate.id === "openrouter"
+                  ? {
+                      "HTTP-Referer": "https://vinted-assistant.vercel.app",
+                      "X-Title": "Vinted COO",
+                    }
+                  : {}),
+              },
+              body: JSON.stringify({
+                model,
+                messages: outgoingMessages,
+                temperature: 0.4,
+                response_format: { type: "json_object" },
+              }),
+              signal: AbortSignal.timeout(timeoutMs),
+            });
+            if (retryRes.ok) {
+              const retryPayload = (await retryRes.json().catch(() => null)) as {
+                choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
+              } | null;
+              const retryContent = retryPayload?.choices?.[0]?.message?.content;
+              const retryText = Array.isArray(retryContent) ? retryContent.map((p) => p.text || "").join("\n") : retryContent;
+              if (retryText) return retryText;
+            }
+          } catch {
+            // passe au traitement d'erreur standard
+          }
+        }
+      }
+
       if (/no active credentials/i.test(providerMessage)) {
         lastError = new Error(
           `Aucun accès fournisseur actif dans OmniRoute pour ${model}. Active un compte fournisseur ou configure une clé Cloud (Gemini / OpenRouter) dans "Moteur IA".`
@@ -728,6 +770,10 @@ async function callOpenAiCompatible(
       } else if (/exhausted their quota|quota.*exhaust|insufficient.*credit/i.test(providerMessage)) {
         lastError = new Error(`Quota ou crédits épuisés pour ${model} sur ${candidate.label}.`);
         continue;
+      } else if (response.status === 429) {
+        lastError = new Error(
+          `Quota temporaire par minute atteint sur ${candidate.label}. Attends 10 secondes et relance l'analyse.`
+        );
       } else {
         lastError = new Error(providerMessage);
       }

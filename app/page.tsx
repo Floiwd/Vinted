@@ -262,8 +262,8 @@ async function stitchPhotosToCollage(photos: Photo[]): Promise<Photo> {
   const cols = count === 2 ? 2 : count <= 4 ? 2 : 3;
   const rows = Math.ceil(count / cols);
 
-  const tileW = 640;
-  const tileH = 640;
+  const tileW = count <= 2 ? 420 : 360;
+  const tileH = count <= 2 ? 420 : 360;
   const canvas = document.createElement("canvas");
   canvas.width = cols * tileW;
   canvas.height = rows * tileH;
@@ -279,28 +279,28 @@ async function stitchPhotosToCollage(photos: Photo[]): Promise<Photo> {
     const x = col * tileW;
     const y = row * tileH;
 
-    const scale = Math.min((tileW - 8) / img.naturalWidth, (tileH - 44) / img.naturalHeight);
+    const scale = Math.min((tileW - 8) / img.naturalWidth, (tileH - 38) / img.naturalHeight);
     const drawW = img.naturalWidth * scale;
     const drawH = img.naturalHeight * scale;
     const drawX = x + (tileW - drawW) / 2;
-    const drawY = y + 4 + (tileH - 44 - drawH) / 2;
+    const drawY = y + 4 + (tileH - 38 - drawH) / 2;
 
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
 
     ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
-    ctx.fillRect(x, y + tileH - 36, tileW, 36);
+    ctx.fillRect(x, y + tileH - 30, tileW, 30);
     ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 15px sans-serif";
+    ctx.font = "bold 13px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(angle, x + tileW / 2, y + tileH - 18);
+    ctx.fillText(angle, x + tileW / 2, y + tileH - 15);
   });
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (value) => (value ? resolve(value) : reject(new Error("Assemblage photo impossible."))),
       "image/jpeg",
-      0.78
+      0.72
     );
   });
 
