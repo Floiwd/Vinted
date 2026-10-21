@@ -588,7 +588,7 @@ async function callAnthropicNative(
   const resolvedModel =
     model && model.includes("claude") && !model.startsWith("auto/")
       ? model.replace(/^anthropic\//i, "")
-      : "claude-sonnet-4-20250514";
+      : "claude-3-5-sonnet-20241022";
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
