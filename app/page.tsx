@@ -397,20 +397,19 @@ async function createAnalysisRequestBody(
 
   const limitBytes = 3_500_000;
   const variants = [
-    { maxDimension: 1500, quality: 0.78 },
-    { maxDimension: 1200, quality: 0.65 },
-    { maxDimension: 900, quality: 0.50 },
-    { maxDimension: 720, quality: 0.40 },
-    { maxDimension: 600, quality: 0.32 },
+    { maxDimension: 1000, quality: 0.75 },
+    { maxDimension: 850, quality: 0.65 },
+    { maxDimension: 720, quality: 0.50 },
+    { maxDimension: 600, quality: 0.38 },
   ];
 
   for (const variant of variants) {
-    const requestPhotos = variant.maxDimension === 1500 && variant.quality === 0.78
-      ? preparedPhotos
-      : await Promise.all(preparedPhotos.map(async (photo) => ({
+    const requestPhotos = await Promise.all(
+      preparedPhotos.map(async (photo) => ({
         ...photo,
         dataUrl: await compressPhotoDataUrl(photo.dataUrl, variant.maxDimension, variant.quality),
-      })));
+      }))
+    );
     const body = JSON.stringify({
       photos: requestPhotos.map(({ dataUrl, angle }) => ({ dataUrl, angle })),
       prixAchat,

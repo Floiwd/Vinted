@@ -647,7 +647,8 @@ function resolveOpenAiCompatibleModels(
     if (task === "vision") {
       return ["qwen/qwen3.8-27b"];
     }
-    return ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
+    // openai/gpt-oss-20b est ultra-rapide (~1s) avec des quotas TPM/TPD élevés et stables sur Groq Cloud
+    return ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "openai/gpt-oss-120b"];
   }
 
   return [requestedModel];
@@ -673,7 +674,7 @@ async function callOpenAiCompatible(
       const filteredParts = msg.content.filter((part) => {
         if (part.type === "image_url") {
           imageCount++;
-          return imageCount <= 3;
+          return imageCount <= 2; // Strictement 2 images max (ou planches de photos) pour rester sous le seuil ITPM de 7000 tokens de Groq
         }
         return true;
       });
@@ -722,11 +723,38 @@ async function callOpenAiCompatible(
     if (!response.ok) {
       const providerMessage = payload?.error?.message || `${candidate.label} a répondu ${response.status}.`;
 
-      // Si limitation de débit temporaire (429 Rate Limit), pause et réessai automatique
+      // Si limitation de débit temporaire (429 Rate Limit), pause intelligente et réessai automatique
       if (response.status === 429) {
-        const match = providerMessage.match(/try again in ([0-9.]+)s/i);
-        const waitSec = match ? Math.min(8, Math.max(1, Math.ceil(parseFloat(match[1])))) : 3;
-        if (waitSec <= 8) {
+        const match = providerMessage.match(/(?:try again in|resets in)\s*([0-9.]+)\s*s/i);
+        const headerRetry = response.headers.get("retry-after");
+        const parsedSec = match
+          ? parseFloat(match[1])
+          : headerRetry
+            ? parseFloat(headerRetry)
+            : 3;
+        // Pause calculée avec marge de sécurité, dans la limite de 16 secondes (budget Vercel 60s)
+        const waitSec = Math.min(16, Math.max(1.5, Math.ceil(parsedSec) + 1.2));
+
+        // En vision sur Groq, si un 429 survient, on compresse le réessai à 1 seule image pour diviser les tokens par deux
+        let retryMessages = outgoingMessages;
+        if (candidate.id === "groq" && task === "vision") {
+          let retryImgCount = 0;
+          retryMessages = outgoingMessages.map((msg) => {
+            if (typeof msg.content === "string") return msg;
+            return {
+              ...msg,
+              content: msg.content.filter((part) => {
+                if (part.type === "image_url") {
+                  retryImgCount++;
+                  return retryImgCount <= 1;
+                }
+                return true;
+              }),
+            };
+          });
+        }
+
+        if (waitSec <= 16) {
           await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
           try {
             const retryRes = await fetch(endpoint, {
@@ -743,7 +771,7 @@ async function callOpenAiCompatible(
               },
               body: JSON.stringify({
                 model,
-                messages: outgoingMessages,
+                messages: retryMessages,
                 temperature: 0.4,
                 response_format: { type: "json_object" },
               }),
@@ -758,7 +786,7 @@ async function callOpenAiCompatible(
               if (retryText) return retryText;
             }
           } catch {
-            // passe au traitement d'erreur standard
+            // Passe au modèle de repli suivant
           }
         }
       }
@@ -769,16 +797,19 @@ async function callOpenAiCompatible(
         );
       } else if (/exhausted their quota|quota.*exhaust|insufficient.*credit/i.test(providerMessage)) {
         lastError = new Error(`Quota ou crédits épuisés pour ${model} sur ${candidate.label}.`);
-        continue;
+        if (models.length > 1) continue;
       } else if (response.status === 429) {
         lastError = new Error(
-          `Quota temporaire par minute atteint sur ${candidate.label}. Attends 10 secondes et relance l'analyse.`
+          `Quota temporaire par minute atteint pour ${model} sur ${candidate.label}.`
         );
+        // Si d'autres modèles sont disponibles pour ce fournisseur (ex: gpt-oss-20b puis qwen sur Groq), on tente le suivant immédiatement !
+        if (models.length > 1) continue;
       } else {
         lastError = new Error(providerMessage);
       }
-      // Sur OpenRouter, si un modèle échoue (ex: pas assez de crédits pour Claude), on tente le suivant (ex: Gemini Flash)
-      if (candidate.id === "openrouter" && models.length > 1) {
+
+      // Si d'autres modèles de repli existent pour ce candidat, on tente le suivant
+      if (models.length > 1) {
         continue;
       }
       throw lastError;

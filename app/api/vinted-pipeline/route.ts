@@ -620,6 +620,11 @@ export async function POST(request: Request) {
         "- titre_court, titre_seo, description, defauts_transparence, hashtags, message_nego (pour l'annonce de revente future)."
       : "Tu es un rédacteur d'élite pour vendeurs Vinted. Tu rédiges des annonces percutantes, honnêtes, vendeuses et ultra-optimisées pour l'algorithme de recherche Vinted. Réponds en JSON strict avec les clés : titre_court, titre_seo, description, defauts_transparence, hashtags, message_nego.\nRÈGLES :\n1) titre_court : court, percutant et direct (ex: 'Jean Levi's 501 Bleu W32 L34').\n2) titre_seo : enrichi avec les mots-clés les plus cherchés sur Vinted (marque, coupe, matière, couleur, époque/style comme Vintage, Y2K, Streetwear, Oversize).\n3) description : annonce structurée premium en français : '📝 Titre', '📏 Détails & Taille', '✨ État & Authenticité', '🛡️ Transparence (mentionne clairement les défauts observés pour éviter tout litige acheteur)', '💡 Conseil look / Pourquoi l'acheter'.\n4) defauts_transparence : 1 à 2 phrases claires et rassurantes décrivant l'état réel pour sécuriser la transaction.\n5) hashtags : 10 à 15 hashtags #... ultra-ciblés, sans spam, correspondant exactement à la pièce.\n6) message_nego : phrase courtoise et ferme à envoyer à un acheteur qui fait une offre trop basse.";
 
+    // Si Groq a traité la vision, courte pause préventive de 800ms pour régénérer la fenêtre de tokens
+    if (visionResult.providerId === "groq") {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+
     const copyResult = await executeAiPrompt({
       task: "copy",
       defaultModel: process.env.CLAUDE_MODEL || "auto/claude-sonnet",
